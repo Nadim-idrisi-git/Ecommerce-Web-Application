@@ -1,5 +1,5 @@
 import express from 'express'
-import cors from 'cors'
+import cors from 'cors';
 import 'dotenv/config'
 import connectDB from './config/mongodb.js'
 import connectCloudinary from './config/cloudinary.js'
@@ -31,6 +31,9 @@ app.use((req, res, next) => {
 })
 app.use(cors({
   origin(origin, callback) {
+    "https://idris-frontend-ten.vercel.app/"
+    "https://idris-admin-nu.vercel.app/"
+
     if (!origin || allowedOrigins.includes(origin)) {
       return callback(null, true)
     }
