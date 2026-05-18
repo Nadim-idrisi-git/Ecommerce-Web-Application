@@ -11,12 +11,30 @@ import path from 'path'
 // App config
 const app = express()
 const port = process.env.PORT || 4000
+const defaultAllowedOrigins = [
+  "https://idris-topaz.vercel.app",
+  "https://idris-frontend-ten.vercel.app",
+  "https://idris-admin-ebon.vercel.app",
+  "https://idris-admin-nu.vercel.app",
+]
 const allowedOrigins = [
   process.env.FRONTEND_URL,
   process.env.ADMIN_URL,
+  ...defaultAllowedOrigins,
   "http://localhost:5173",
   "http://localhost:5174",
-].filter(Boolean)
+]
+  .filter(Boolean)
+  .map((origin) => origin.replace(/\/+$/, ""))
+
+const allowedVercelAppPattern = /^https:\/\/idris-(frontend|admin)(-[a-z0-9-]+)?\.vercel\.app$/i
+
+const isAllowedOrigin = (origin) => {
+  if (!origin) return true
+
+  const cleanOrigin = origin.replace(/\/+$/, "")
+  return allowedOrigins.includes(cleanOrigin) || allowedVercelAppPattern.test(cleanOrigin)
+}
 
 connectCloudinary()
 
@@ -31,10 +49,7 @@ app.use((req, res, next) => {
 })
 app.use(cors({
   origin(origin, callback) {
-    "https://idris-frontend-ten.vercel.app/"
-    "https://idris-admin-nu.vercel.app/"
-
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (isAllowedOrigin(origin)) {
       return callback(null, true)
     }
 
