@@ -137,8 +137,8 @@ const placeOrder = async (req, res) => {
             amount,
             address,
             paymentMethod,
-            payment: paymentMethod === "COD",
-            paymentStatus: paymentMethod === "COD" ? "paid" : "pending",
+            payment: false,
+            paymentStatus: "pending",
             statusHistory: [{ status: "Order Placed", date: Date.now(), note: "Order received" }],
             date: Date.now()
         };
@@ -391,7 +391,9 @@ const updateOrder = async (req, res) => {
         if (trackingNumber !== undefined) order.trackingNumber = trackingNumber;
         if (estimatedDelivery !== undefined) order.estimatedDelivery = estimatedDelivery;
         if (adminNote !== undefined) order.adminNote = adminNote;
-        if (payment !== undefined) order.payment = payment;
+        if (payment !== undefined){ order.payment = payment;
+            order.paymentStatus = payment ? "paid" : "pending";
+        }
 
         if (status === "Cancelled" && order.status !== "Cancelled") {
             await cancelOrderWithRefund(order, {
