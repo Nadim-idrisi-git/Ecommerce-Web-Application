@@ -79,7 +79,7 @@ const ShopContextProvider = (props) => {
 
     setCartItems(cartData);
     saveCart(cartData);
-    toast.success("Added to cart");
+    //toast.success("Added to cart");
   };
 
   const buyNow = async (itemId, size) => {

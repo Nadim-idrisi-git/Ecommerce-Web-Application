@@ -7,6 +7,7 @@ import userRouter from './routes/userRoute.js'
 import productRouter from './routes/productRoute.js'
 import orderRouter from './routes/orderRoute.js'
 import path from 'path'
+import chatRouter from "./routes/chatRoute.js";
 
 // App config
 const app = express()
@@ -78,6 +79,7 @@ app.use('/assets', express.static(path.resolve(process.cwd(), '../idris-frontend
 app.use('/api/user', userRouter);
 app.use('/api/product', productRouter);
 app.use('/api/order', orderRouter);
+app.use("/api/chat", chatRouter);
 app.get('/', (req, res) => {
   res.json("API working!")
 })
