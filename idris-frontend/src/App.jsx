@@ -19,6 +19,7 @@ import SearchBar from './components/SearchBar'
 import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import ChatWidget from './components/ChatWidget'
+import AIAssistant from './components/AIAssistant'
 
 const App = () => {
   return (
@@ -41,6 +42,7 @@ const App = () => {
         <Route path='/addresses' element={<Addresses/>}/>
         <Route path='/verify' element={<Verify/>}/>
       </Routes>
+      <AIAssistant />
       <ChatWidget />
       <Footer/>
     </div>
