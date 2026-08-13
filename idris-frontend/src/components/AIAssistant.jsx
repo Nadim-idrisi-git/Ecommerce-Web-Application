@@ -17,6 +17,7 @@ export default function AIAssistant() {
   const [searchResults, setSearchResults] = useState([]);
   const [recommendationQuery, setRecommendationQuery] = useState("");
   const [recommendations, setRecommendations] = useState([]);
+  const [isSpeaking, setIsSpeaking] = useState(false);
 
   const [supported, setSupported] = useState(true);
 
@@ -25,6 +26,7 @@ export default function AIAssistant() {
   const audioChunksRef = useRef([]);
 
   const recordingMimeTypeRef = useRef("");
+  const speechSynthesisRef = useRef(null);
 
   useEffect(() => {
     const hasMediaDevices =
@@ -40,7 +42,12 @@ export default function AIAssistant() {
 
     return () => {
       stopRecording();
+      stopSpeaking();
     };
+  }, []);
+
+  useEffect(() => {
+    speechSynthesisRef.current = window.speechSynthesis || null;
   }, []);
 
   const getAudioExtension = (mimeType) => {
@@ -51,6 +58,34 @@ export default function AIAssistant() {
     if (mimeType.includes("ogg")) return "ogg";
 
     return "webm";
+  };
+
+  const stopSpeaking = () => {
+    if (speechSynthesisRef.current) {
+      speechSynthesisRef.current.cancel();
+    }
+
+    setIsSpeaking(false);
+  };
+
+  const speakText = (text) => {
+    if (!text || !window.speechSynthesis || typeof SpeechSynthesisUtterance === "undefined") {
+      return;
+    }
+
+    stopSpeaking();
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "en-IN";
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+
+    utterance.onstart = () => setIsSpeaking(true);
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+
+    speechSynthesisRef.current?.speak(utterance);
   };
 
   const detectIntent = (text) => {
@@ -306,29 +341,34 @@ export default function AIAssistant() {
         setCurrentAction("Opening cart");
         navigate("/cart");
         setAiReply("Opening your cart.");
+        speakText("Opening your cart.");
         return;
 
       case "OPEN_COLLECTION":
         setCurrentAction("Opening collection");
         navigate("/collection");
         setAiReply("Showing the collection.");
+        speakText("Showing the collection.");
         return;
 
       case "LOGIN":
         setCurrentAction("Opening login");
         navigate("/login");
         setAiReply("Taking you to login.");
+        speakText("Taking you to login.");
         return;
 
       case "TRACK_ORDER":
         setCurrentAction("Track order needs order ID");
         setAiReply("Please open the order tracking page and enter your order ID.");
+        speakText("Please open the order tracking page and enter your order ID.");
         return;
 
       case "SHOW_OFFERS":
         setCurrentAction("Showing offers");
         navigate("/collection");
         setAiReply("I am showing available offers in the collection.");
+        speakText("I am showing available offers in the collection.");
         return;
 
       case "SEARCH_PRODUCT":
@@ -353,6 +393,11 @@ export default function AIAssistant() {
         : "No strong recommendation match found",
     );
     setAiReply(
+      picks.length > 0
+        ? `I recommend ${picks.map((item) => item.name).join(", ")}.`
+        : "I could not find a strong recommendation, so I opened the catalog.",
+    );
+    speakText(
       picks.length > 0
         ? `I recommend ${picks.map((item) => item.name).join(", ")}.`
         : "I could not find a strong recommendation, so I opened the catalog.",
@@ -391,12 +436,14 @@ export default function AIAssistant() {
       }
 
       setAiReply(data.reply);
+      speakText(data.reply);
 
       setStatus("idle");
     } catch (error) {
       console.log("AI reply error:", error);
 
       setAiReply("Sorry, I am unable to answer right now.");
+      speakText("Sorry, I am unable to answer right now.");
 
       setStatus("error");
     }
@@ -577,12 +624,14 @@ export default function AIAssistant() {
     }
 
     stopRecording();
+    stopSpeaking();
 
     setStatus("idle");
   };
 
   const closeAssistant = () => {
     stopRecording();
+    stopSpeaking();
 
     setOpen(false);
   };
@@ -606,6 +655,9 @@ export default function AIAssistant() {
 
       case "error":
         return "Something went wrong";
+
+      case "speaking":
+        return "Speaking";
 
       default:
         return "Ready to talk";
@@ -890,7 +942,15 @@ bottom:20px;
       <div className={`idris-ai-container ${open ? "open" : ""}`}>
         {open && (
           <div className="idris-ai-box">
-            <div className="idris-ai-status">{getStatusText()}</div>
+              <div className="idris-ai-status">{getStatusText()}</div>
+
+            {isSpeaking && (
+              <div className="idris-ai-message">
+                <strong>Voice:</strong>
+                <br />
+                Speaking out loud
+              </div>
+            )}
 
             {transcript && (
               <div className="idris-ai-message">
