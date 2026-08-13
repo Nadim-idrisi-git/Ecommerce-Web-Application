@@ -1,587 +1,720 @@
 import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { getApiConfig } from "../config/api";
 
 export default function AIAssistant() {
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState("idle");
+
   const [transcript, setTranscript] = useState("");
+  const [aiReply, setAiReply] = useState("");
+  const [intent, setIntent] = useState(null);
+  const [currentAction, setCurrentAction] = useState("");
+
   const [supported, setSupported] = useState(true);
 
-  const recognitionRef = useRef(null);
-  const shouldListenRef = useRef(false);
+  const mediaRecorderRef = useRef(null);
+  const mediaStreamRef = useRef(null);
+  const audioChunksRef = useRef([]);
+
+  const recordingMimeTypeRef = useRef("");
 
   useEffect(() => {
-    const SpeechRecognition =
-      window.SpeechRecognition || window.webkitSpeechRecognition;
+    const hasMediaDevices =
+      navigator.mediaDevices &&
+      typeof navigator.mediaDevices.getUserMedia === "function";
 
-    if (!SpeechRecognition) {
+    const hasMediaRecorder = typeof window.MediaRecorder !== "undefined";
+
+    if (!hasMediaDevices || !hasMediaRecorder) {
       setSupported(false);
-      return;
+      setStatus("unsupported");
     }
 
-    const recognition = new SpeechRecognition();
-
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = "en-IN";
-
-    recognition.onstart = () => {
-      setStatus("listening");
-    };
-
-    recognition.onresult = (event) => {
-      let finalText = "";
-      let interimText = "";
-
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result = event.results[i];
-
-        if (result.isFinal) {
-          finalText += result[0].transcript;
-        } else {
-          interimText += result[0].transcript;
-        }
-      }
-
-      const currentText = `${finalText}${interimText}`.trim();
-
-      if (currentText) {
-        setTranscript(currentText);
-      }
-    };
-
-    recognition.onerror = (event) => {
-      console.error("Speech recognition error:", event.error);
-
-      if (event.error === "not-allowed") {
-        shouldListenRef.current = false;
-        setStatus("permission-denied");
-        return;
-      }
-
-      if (event.error === "no-speech") {
-        return;
-      }
-
-      setStatus("error");
-    };
-
-    recognition.onend = () => {
-      if (shouldListenRef.current) {
-        try {
-          recognition.start();
-        } catch (error) {
-          console.log("Recognition restart skipped.");
-        }
-      } else {
-        setStatus("idle");
-      }
-    };
-
-    recognitionRef.current = recognition;
-
     return () => {
-      shouldListenRef.current = false;
-
-      try {
-        recognition.stop();
-      } catch (error) {
-        // Recognition may already be stopped.
-      }
+      stopRecording();
     };
   }, []);
 
-  const startListening = () => {
-    if (!supported) {
-      setStatus("unsupported");
-      return;
+  const getAudioExtension = (mimeType) => {
+    if (mimeType.includes("webm")) return "webm";
+
+    if (mimeType.includes("mp4")) return "mp4";
+
+    if (mimeType.includes("ogg")) return "ogg";
+
+    return "webm";
+  };
+
+  const detectIntent = (text) => {
+    const normalized = text.toLowerCase().trim();
+
+    const matchers = [
+      {
+        type: "OPEN_CART",
+        values: ["open cart", "show cart", "go to cart", "cart"],
+      },
+      {
+        type: "OPEN_COLLECTION",
+        values: [
+          "open collection",
+          "show collection",
+          "show all products",
+          "browse products",
+          "show products",
+        ],
+      },
+      {
+        type: "TRACK_ORDER",
+        values: ["track order", "where is my order", "order status", "track my order"],
+      },
+      {
+        type: "SHOW_OFFERS",
+        values: ["show offers", "offers", "discounts", "deals", "sale"],
+      },
+      {
+        type: "LOGIN",
+        values: ["login", "log in", "sign in", "signin"],
+      },
+      {
+        type: "SEARCH_PRODUCT",
+        values: [
+          "show me",
+          "find",
+          "search for",
+          "i want",
+          "i need",
+          "looking for",
+        ],
+      },
+    ];
+
+    const matched = matchers.find(({ values }) =>
+      values.some((phrase) => normalized.includes(phrase)),
+    );
+
+    if (!matched) {
+      return {
+        type: "UNKNOWN",
+        value: normalized,
+      };
     }
 
-    if (!recognitionRef.current) {
-      return;
-    }
+    const searchValue =
+      matched.type === "SEARCH_PRODUCT"
+        ? normalized
+            .replace(/^(show me|find|search for|i want|i need|looking for)\s*/i, "")
+            .trim()
+        : normalized;
 
-    setTranscript("");
-    shouldListenRef.current = true;
+    return {
+      type: matched.type,
+      value: searchValue || normalized,
+    };
+  };
 
-    try {
-      recognitionRef.current.start();
-    } catch (error) {
-      console.log("Recognition already running.");
+  const executeIntentAction = (detectedIntent) => {
+    if (!detectedIntent?.type) return;
+
+    switch (detectedIntent.type) {
+      case "OPEN_CART":
+        setCurrentAction("Opening cart");
+        navigate("/cart");
+        setAiReply("Opening your cart.");
+        return;
+
+      case "OPEN_COLLECTION":
+        setCurrentAction("Opening collection");
+        navigate("/collection");
+        setAiReply("Showing the collection.");
+        return;
+
+      case "LOGIN":
+        setCurrentAction("Opening login");
+        navigate("/login");
+        setAiReply("Taking you to login.");
+        return;
+
+      case "TRACK_ORDER":
+        setCurrentAction("Track order needs order ID");
+        setAiReply("Please open the order tracking page and enter your order ID.");
+        return;
+
+      case "SHOW_OFFERS":
+        setCurrentAction("Showing offers");
+        navigate("/collection");
+        setAiReply("I am showing available offers in the collection.");
+        return;
+
+      case "SEARCH_PRODUCT":
+        setCurrentAction("Search intent detected");
+        return;
+
+      default:
+        setCurrentAction("");
     }
   };
 
-  const stopListening = () => {
-    shouldListenRef.current = false;
+  const sendTranscriptToAI = async (text) => {
+    try {
+      setStatus("thinking");
 
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch (error) {
-        // Already stopped.
+      const { backendUrl, apiConfigError } = getApiConfig();
+
+      if (!backendUrl) {
+        throw new Error(apiConfigError || "Backend URL is not configured");
+      }
+
+      const response = await fetch(`${backendUrl}/api/chat`, {
+        method: "POST",
+
+        headers: {
+          "Content-Type": "application/json",
+        },
+
+        body: JSON.stringify({
+          message: text,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || "AI failed");
+      }
+
+      setAiReply(data.reply);
+
+      setStatus("idle");
+    } catch (error) {
+      console.log("AI reply error:", error);
+
+      setAiReply("Sorry, I am unable to answer right now.");
+
+      setStatus("error");
+    }
+  };
+
+  const getSupportedMimeType = () => {
+    const types = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/mp4",
+      "audio/ogg;codecs=opus",
+    ];
+
+    for (const type of types) {
+      if (MediaRecorder.isTypeSupported(type)) {
+        return type;
       }
     }
 
-    setStatus("idle");
+    return "";
+  };
+
+  const startRecording = async () => {
+    try {
+      setTranscript("");
+      setAiReply("");
+      setIntent(null);
+
+      setStatus("requesting-mic");
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+
+      mediaStreamRef.current = stream;
+
+      const mimeType = getSupportedMimeType();
+
+      recordingMimeTypeRef.current = mimeType;
+
+      const recorder = new MediaRecorder(
+        stream,
+
+        mimeType ? { mimeType } : undefined,
+      );
+
+      mediaRecorderRef.current = recorder;
+
+      audioChunksRef.current = [];
+
+      recorder.onstart = () => {
+        console.log("Recording started");
+
+        setStatus("listening");
+      };
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, {
+          type:
+            recordingMimeTypeRef.current || recorder.mimeType || "audio/webm",
+        });
+
+        audioChunksRef.current = [];
+
+        if (!audioBlob.size) {
+          setStatus("error");
+          return;
+        }
+
+        try {
+          setStatus("transcribing");
+
+          const formData = new FormData();
+
+          formData.append(
+            "audio",
+            audioBlob,
+            `idris.${getAudioExtension(audioBlob.type)}`,
+          );
+
+      const { backendUrl, apiConfigError } = getApiConfig();
+
+      if (!backendUrl) {
+        throw new Error(apiConfigError || "Backend URL is not configured");
+      }
+
+      const response = await fetch(`${backendUrl}/api/voice/transcribe`, {
+        method: "POST",
+        body: formData,
+      });
+
+          const data = await response.json();
+
+          if (!data.success) {
+            throw new Error(data.message);
+          }
+
+          const text = data.transcript.trim();
+
+          setTranscript(text);
+          const detectedIntent = detectIntent(text);
+          setIntent(detectedIntent);
+          executeIntentAction(detectedIntent);
+
+          await sendTranscriptToAI(text);
+        } catch (error) {
+          console.log("Voice error:", error);
+
+          setStatus("error");
+        }
+      };
+
+      recorder.start(250);
+    } catch (error) {
+      console.log("Mic error", error);
+
+      setStatus("permission-denied");
+    }
+  };
+
+  const stopRecording = () => {
+    const recorder = mediaRecorderRef.current;
+
+    if (recorder && recorder.state !== "inactive") {
+      recorder.stop();
+    }
+
+    mediaRecorderRef.current = null;
+
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+
+      mediaStreamRef.current = null;
+    }
   };
 
   const handleAssistantClick = () => {
     if (!open) {
       setOpen(true);
 
-      // Start microphone only after explicit user interaction.
       setTimeout(() => {
-        startListening();
-      }, 450);
+        startRecording();
+      }, 400);
 
       return;
     }
 
-    stopListening();
+    stopRecording();
+
+    setStatus("idle");
+  };
+
+  const closeAssistant = () => {
+    stopRecording();
+
     setOpen(false);
-    setTranscript("");
   };
 
   const getStatusText = () => {
     switch (status) {
+      case "requesting-mic":
+        return "Requesting microphone";
+
       case "listening":
         return "Listening";
 
-      case "permission-denied":
-        return "Microphone access denied";
+      case "transcribing":
+        return "Converting voice";
 
-      case "unsupported":
-        return "Voice input not supported";
+      case "thinking":
+        return "Thinking";
+
+      case "permission-denied":
+        return "Microphone denied";
 
       case "error":
-        return "Voice input unavailable";
+        return "Something went wrong";
 
       default:
         return "Ready to talk";
     }
   };
 
+  const formatIntent = (value) => {
+    if (!value) return "";
+
+    return value
+      .split("_")
+      .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
+      .join(" ");
+  };
+
   return (
     <>
       <style>{`
-        @keyframes aiPulse {
-          0% {
-            transform: scale(1);
-            opacity: 0.55;
-          }
-
-          70% {
-            transform: scale(1.7);
-            opacity: 0;
-          }
-
-          100% {
-            transform: scale(1.7);
-            opacity: 0;
-          }
-        }
-
-        @keyframes aiOrbPulse {
-          0%, 100% {
-            transform: scale(1);
-          }
-
-          50% {
-            transform: scale(1.06);
-          }
-        }
-
-        @keyframes aiWave {
-          0%, 100% {
-            transform: scaleY(0.35);
-            opacity: 0.5;
-          }
-
-          50% {
-            transform: scaleY(1);
-            opacity: 1;
-          }
-        }
-
-        @keyframes aiOpen {
-          from {
-            opacity: 0;
-            transform: translate(-50%, 10px) scale(0.9);
-          }
-
-          to {
-            opacity: 1;
-            transform: translate(-50%, 0) scale(1);
-          }
-        }
-
-        .idris-ai-container {
-          position: fixed;
-          right: 10px;
-          bottom: 84px;
-          z-index: 10000;
-
-          transition:
-            left 0.55s cubic-bezier(0.22, 1, 0.36, 1),
-            right 0.55s cubic-bezier(0.22, 1, 0.36, 1),
-            bottom 0.55s cubic-bezier(0.22, 1, 0.36, 1),
-            transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
-        }
-
-        .idris-ai-container.open {
-          left: 50%;
-          right: auto;
-          transform: translateX(-50%);
-          bottom: 28px;
-        }
-
-        .idris-ai-button {
-          position: relative;
-
-          width: 56px;
-          height: 56px;
-
-          border: none;
-          border-radius: 50%;
-
-          background: #1a1a1a;
-          color: #fff;
-
-          cursor: pointer;
 
-          display: flex;
-          align-items: center;
-          justify-content: center;
+@keyframes pulse{
 
-          box-shadow:
-            0 8px 28px rgba(0, 0, 0, 0.25);
+0%{
+transform:scale(1);
+opacity:.5;
+}
 
-          transition:
-            width 0.45s ease,
-            height 0.45s ease,
-            box-shadow 0.3s ease;
-        }
+100%{
+transform:scale(1.8);
+opacity:0;
+}
 
-        .idris-ai-container.open .idris-ai-button {
-          width: 74px;
-          height: 74px;
+}
 
-          box-shadow:
-            0 12px 40px rgba(0, 0, 0, 0.3),
-            0 0 0 8px rgba(184, 159, 138, 0.08);
-        }
 
-        .idris-ai-container.open.listening .idris-ai-button {
-          animation: aiOrbPulse 1.4s ease-in-out infinite;
-        }
 
-        .idris-ai-button::before {
-          content: "";
+@keyframes orb{
 
-          position: absolute;
-          inset: 0;
+50%{
+transform:scale(1.08);
+}
 
-          border-radius: 50%;
+}
 
-          background: #b89f8a;
 
-          animation: aiPulse 1.8s ease-out infinite;
 
-          z-index: -1;
-        }
+.idris-ai-container{
 
-        .idris-ai-container.open .idris-ai-button::before {
-          animation-duration: 1.4s;
-        }
+position:fixed;
 
-        .idris-ai-orb {
-          width: 34px;
-          height: 34px;
+right:12px;
 
-          border-radius: 50%;
+bottom:85px;
 
-          background:
-            radial-gradient(
-              circle at 35% 30%,
-              #ffffff 0%,
-              #ddd4cd 18%,
-              #b89f8a 42%,
-              #51453d 72%,
-              #1a1a1a 100%
-            );
+z-index:9999;
 
-          box-shadow:
-            inset 0 2px 5px rgba(255,255,255,0.45),
-            0 0 16px rgba(184,159,138,0.45);
 
-          transition: all 0.4s ease;
-        }
+transition:.5s ease;
 
-        .idris-ai-container.open .idris-ai-orb {
-          width: 46px;
-          height: 46px;
-        }
+}
 
-        .idris-ai-status {
-          position: absolute;
 
-          bottom: calc(100% + 12px);
-          left: 50%;
 
-          transform: translateX(-50%);
+.idris-ai-container.open{
 
-          background: #1a1a1a;
-          color: #fff;
+left:50%;
 
-          padding: 7px 12px;
+right:auto;
 
-          border-radius: 20px;
+bottom:30px;
 
-          white-space: nowrap;
+transform:translateX(-50%);
 
-          font-family: Outfit, sans-serif;
-          font-size: 11px;
+}
 
-          letter-spacing: 0.04em;
 
-          box-shadow:
-            0 8px 24px rgba(0,0,0,0.16);
 
-          animation: aiOpen 0.3s ease forwards;
-        }
 
-        .idris-ai-status::after {
-          content: "";
+.idris-ai-button{
 
-          position: absolute;
 
-          left: 50%;
-          top: 100%;
+width:56px;
 
-          transform: translateX(-50%);
+height:56px;
 
-          border-left: 5px solid transparent;
-          border-right: 5px solid transparent;
-          border-top: 5px solid #1a1a1a;
-        }
+border-radius:50%;
 
-        .idris-ai-waves {
-          display: flex;
-          align-items: center;
-          justify-content: center;
+border:none;
 
-          gap: 3px;
+background:#1a1a1a;
 
-          height: 20px;
-        }
+display:flex;
 
-        .idris-ai-wave {
-          width: 3px;
-          height: 16px;
+align-items:center;
 
-          border-radius: 10px;
+justify-content:center;
 
-          background: #fff;
+cursor:pointer;
 
-          animation:
-            aiWave 0.8s ease-in-out infinite;
-        }
+box-shadow:
+0 8px 30px rgba(0,0,0,.3);
 
-        .idris-ai-wave:nth-child(1) {
-          animation-delay: 0s;
-        }
 
-        .idris-ai-wave:nth-child(2) {
-          animation-delay: 0.12s;
-        }
+position:relative;
+z-index:10001;
 
-        .idris-ai-wave:nth-child(3) {
-          animation-delay: 0.24s;
-        }
 
-        .idris-ai-wave:nth-child(4) {
-          animation-delay: 0.36s;
-        }
+}
 
-        .idris-ai-transcript {
-          position: absolute;
 
-          bottom: calc(100% + 52px);
-          left: 50%;
 
-          transform: translateX(-50%);
+.idris-ai-container.open
+.idris-ai-button{
 
-          width: min(340px, 80vw);
 
-          padding: 10px 14px;
+width:74px;
 
-          border: 1px solid #e8e0d8;
-          border-radius: 10px;
+height:74px;
 
-          background: rgba(255,255,255,0.96);
 
-          color: #2c2c2c;
+}
 
-          font-family: Outfit, sans-serif;
-          font-size: 13px;
-          line-height: 1.4;
 
-          text-align: center;
 
-          box-shadow:
-            0 10px 35px rgba(0,0,0,0.12);
+.idris-ai-container.listening
+.idris-ai-button{
 
-          animation: aiOpen 0.25s ease forwards;
-        }
 
-        .idris-ai-hint {
-          position: absolute;
+animation:orb 1s infinite;
 
-          bottom: calc(100% + 52px);
-          left: 50%;
+}
 
-          transform: translateX(-50%);
 
-          width: max-content;
-          max-width: 80vw;
 
-          padding: 10px 14px;
 
-          background: #fff;
+.idris-ai-button::before{
 
-          border: 1px solid #e8e0d8;
-          border-radius: 10px;
 
-          color: #777;
+content:"";
 
-          font-family: Outfit, sans-serif;
-          font-size: 12px;
+position:absolute;
 
-          box-shadow:
-            0 10px 35px rgba(0,0,0,0.1);
+inset:0;
 
-          animation: aiOpen 0.25s ease forwards;
-        }
+border-radius:50%;
 
-        @media (max-width: 768px) {
-          .idris-ai-container {
-            right: 10px;
-            bottom: 84px;
-          }
+background:#b89f8a;
 
-          .idris-ai-container.open {
-            left: 50%;
-            right: auto;
-            bottom: 22px;
-          }
-        }
+z-index:-1;
 
-        @media (max-width: 480px) {
-          .idris-ai-container {
-            right: 12px;
-            bottom: 82px;
-          }
+animation:pulse 1.5s infinite;
 
-          .idris-ai-container.open {
-            left: 50%;
-            right: auto;
-            bottom: 18px;
-          }
 
-          .idris-ai-button {
-            width: 52px;
-            height: 52px;
-          }
+}
 
-          .idris-ai-container.open .idris-ai-button {
-            width: 68px;
-            height: 68px;
-          }
 
-          .idris-ai-orb {
-            width: 31px;
-            height: 31px;
-          }
 
-          .idris-ai-container.open .idris-ai-orb {
-            width: 42px;
-            height: 42px;
-          }
-        }
 
-        @media (prefers-reduced-motion: reduce) {
-          .idris-ai-container,
-          .idris-ai-button {
-            transition: none;
-          }
+.idris-ai-orb{
 
-          .idris-ai-button::before,
-          .idris-ai-button,
-          .idris-ai-wave {
-            animation: none;
-          }
-        }
-      `}</style>
 
-      <div
-        className={`idris-ai-container ${
-          open ? `open ${status}` : ""
-        }`}
-      >
+width:35px;
+
+height:35px;
+
+border-radius:50%;
+
+
+background:
+radial-gradient(
+circle at 30% 30%,
+white,
+#b89f8a,
+#1a1a1a
+);
+
+
+
+}
+
+
+
+.idris-ai-box{
+
+  position:absolute;
+
+  bottom:80px;
+
+  left:50%;
+
+  transform:translateX(-50%);
+
+  width:min(350px,85vw);
+
+  display:flex;
+
+  flex-direction:column;
+
+  gap:8px;
+  pointer-events:none;
+  }
+
+
+
+
+
+
+.idris-ai-message{
+
+
+background:white;
+
+border:1px solid #e8e0d8;
+
+padding:12px 15px;
+
+border-radius:12px;
+
+font-family:Outfit;
+
+font-size:13px;
+
+text-align:center;
+
+
+box-shadow:
+0 10px 30px rgba(0,0,0,.12);
+
+
+}
+
+
+
+.idris-ai-status{
+
+
+background:#1a1a1a;
+
+color:white;
+
+padding:7px 14px;
+
+border-radius:20px;
+
+font-size:12px;
+
+margin:auto;
+
+font-family:Outfit;
+
+
+}
+
+
+
+@media(max-width:480px){
+
+
+.idris-ai-container.open{
+
+bottom:20px;
+
+}
+
+
+
+}
+
+`}</style>
+
+      <div className={`idris-ai-container ${open ? "open" : ""}`}>
         {open && (
-          <>
-            {transcript ? (
-              <div className="idris-ai-transcript">
+          <div className="idris-ai-box">
+            <div className="idris-ai-status">{getStatusText()}</div>
+
+            {transcript && (
+              <div className="idris-ai-message">
+                <strong>You:</strong>
+                <br />
+
                 {transcript}
-              </div>
-            ) : (
-              <div className="idris-ai-hint">
-                {status === "listening"
-                  ? "I'm listening..."
-                  : getStatusText()}
               </div>
             )}
 
-            <div className="idris-ai-status">
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                }}
-              >
-                <span>{getStatusText()}</span>
-
-                {status === "listening" && (
-                  <div className="idris-ai-waves">
-                    <span className="idris-ai-wave" />
-                    <span className="idris-ai-wave" />
-                    <span className="idris-ai-wave" />
-                    <span className="idris-ai-wave" />
-                  </div>
+            {intent && (
+              <div className="idris-ai-message">
+                <strong>Intent:</strong>
+                <br />
+                {formatIntent(intent.type)}
+                {intent.value && intent.type !== "UNKNOWN" && (
+                  <>
+                    <br />
+                    <span style={{ color: "#6b6b6b" }}>{intent.value}</span>
+                  </>
                 )}
               </div>
-            </div>
-          </>
+            )}
+
+            {currentAction && (
+              <div className="idris-ai-message">
+                <strong>Action:</strong>
+                <br />
+                {currentAction}
+              </div>
+            )}
+
+            {aiReply && (
+              <div className="idris-ai-message">
+                <strong>IDRIS AI:</strong>
+
+                <br />
+
+                {aiReply}
+              </div>
+            )}
+
+            {!transcript && !aiReply && (
+              <div className="idris-ai-message">Speak something...</div>
+            )}
+          </div>
         )}
 
         <button
-          type="button"
           className="idris-ai-button"
-          onClick={handleAssistantClick}
-          aria-label={
-            open
-              ? "Stop AI Assistant"
-              : "Start AI Assistant"
-          }
-          aria-pressed={open}
+          onClick={open ? closeAssistant : handleAssistantClick}
         >
           {open ? (
             <span
+              onClick={(e) => {
+                e.stopPropagation();
+                closeAssistant();
+              }}
               style={{
-                color: "#fff",
-                fontSize: 25,
-                lineHeight: 1,
-                fontWeight: 300,
+                color: "white",
+                fontSize: "28px",
+                cursor: "pointer",
+                zIndex: 10002,
+                position: "relative",
               }}
             >
               ×
