@@ -15,6 +15,8 @@ export default function AIAssistant() {
   const [currentAction, setCurrentAction] = useState("");
   const [searchFilters, setSearchFilters] = useState(null);
   const [searchResults, setSearchResults] = useState([]);
+  const [recommendationQuery, setRecommendationQuery] = useState("");
+  const [recommendations, setRecommendations] = useState([]);
 
   const [supported, setSupported] = useState(true);
 
@@ -177,6 +179,98 @@ export default function AIAssistant() {
     return filters;
   };
 
+  const getRecommendationKeywords = (text) => {
+    const normalized = text.toLowerCase();
+    const keywords = [];
+
+    const groups = [
+      { keyword: "winter", terms: ["winter", "cold", "warm", "warm clothes", "winter clothes"] },
+      { keyword: "office", terms: ["office", "work", "formal", "professional", "business"] },
+      { keyword: "party", terms: ["party", "event", "occasion", "wedding", "festive"] },
+      { keyword: "casual", terms: ["casual", "daily", "everyday", "regular"] },
+      { keyword: "travel", terms: ["travel", "trip", "vacation", "holiday", "journey"] },
+      { keyword: "sport", terms: ["sport", "gym", "fitness", "running", "training"] },
+      { keyword: "comfort", terms: ["comfortable", "comfort", "soft", "easy"] },
+    ];
+
+    groups.forEach(({ keyword, terms }) => {
+      if (terms.some((term) => normalized.includes(term))) {
+        keywords.push(keyword);
+      }
+    });
+
+    return keywords;
+  };
+
+  const scoreRecommendations = (keywords) => {
+    if (!keywords.length) return [];
+
+    const scored = products.map((product) => {
+      const haystack = [
+        product.name,
+        product.category,
+        product.subCategory,
+        product.description,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      let score = 0;
+
+      keywords.forEach((keyword) => {
+        if (haystack.includes(keyword)) score += 3;
+      });
+
+      if (keywords.includes("winter") && /jacket|hoodie|sweater|coat|shawl/.test(haystack)) {
+        score += 5;
+      }
+
+      if (keywords.includes("office") && /shirt|trouser|pant|blazer|formal/.test(haystack)) {
+        score += 5;
+      }
+
+      if (keywords.includes("party") && /dress|topwear|shirt|fashion|stylish/.test(haystack)) {
+        score += 4;
+      }
+
+      if (keywords.includes("travel") && /jacket|hoodie|shirt|pant|casual/.test(haystack)) {
+        score += 3;
+      }
+
+      if (keywords.includes("sport") && /t-shirt|tee|shirt|track|short|jogger/.test(haystack)) {
+        score += 4;
+      }
+
+      if (product.bestseller) {
+        score += 2;
+      }
+
+      return { product, score };
+    });
+
+    return scored
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .map((item) => item.product)
+      .slice(0, 3);
+  };
+
+  const isRecommendationRequest = (text) => {
+    const normalized = text.toLowerCase();
+    return [
+      "recommend",
+      "suggest",
+      "best for",
+      "what should i wear",
+      "what can you suggest",
+      "need clothes for",
+      "i need",
+      "show me something",
+      "outfit",
+    ].some((phrase) => normalized.includes(phrase));
+  };
+
   const filterProducts = (filters) => {
     if (!filters) return [];
 
@@ -245,6 +339,27 @@ export default function AIAssistant() {
       default:
         setCurrentAction("");
     }
+  };
+
+  const handleRecommendationQuery = (text) => {
+    const keywords = getRecommendationKeywords(text);
+    const picks = scoreRecommendations(keywords);
+
+    setRecommendationQuery(text.trim());
+    setRecommendations(picks);
+    setCurrentAction(
+      picks.length > 0
+        ? `Showing ${picks.length} recommended products`
+        : "No strong recommendation match found",
+    );
+    setAiReply(
+      picks.length > 0
+        ? `I recommend ${picks.map((item) => item.name).join(", ")}.`
+        : "I could not find a strong recommendation, so I opened the catalog.",
+    );
+    setSearch("");
+    setShowSearch(false);
+    navigate("/collection");
   };
 
   const sendTranscriptToAI = async (text) => {
@@ -414,6 +529,8 @@ export default function AIAssistant() {
                 ? `I found ${matchingProducts.length} matching products.`
                 : "I could not find an exact match, so I opened the collection.",
             );
+          } else if (isRecommendationRequest(text)) {
+            handleRecommendationQuery(text);
           } else {
             await sendTranscriptToAI(text);
           }
@@ -819,6 +936,22 @@ bottom:20px;
                 <strong>Matching Products:</strong>
                 <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
                   {searchResults.slice(0, 3).map((product) => (
+                    <div key={product._id} style={{ padding: 8, borderRadius: 10, background: "#f8f4ef" }}>
+                      <div style={{ fontWeight: 600 }}>{product.name}</div>
+                      <div style={{ fontSize: 12, color: "#666" }}>
+                        {product.category} {product.subCategory ? `• ${product.subCategory}` : ""} • ${product.price}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {recommendations.length > 0 && (
+              <div className="idris-ai-message" style={{ textAlign: "left" }}>
+                <strong>Recommended For You:</strong>
+                <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+                  {recommendations.map((product) => (
                     <div key={product._id} style={{ padding: 8, borderRadius: 10, background: "#f8f4ef" }}>
                       <div style={{ fontWeight: 600 }}>{product.name}</div>
                       <div style={{ fontSize: 12, color: "#666" }}>
