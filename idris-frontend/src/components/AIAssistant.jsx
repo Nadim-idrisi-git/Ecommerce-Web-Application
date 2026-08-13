@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getApiConfig } from "../config/api";
+import { ShopContext } from "../context/ShopContext";
 
 export default function AIAssistant() {
   const navigate = useNavigate();
+  const { products, setSearch, setShowSearch } = useContext(ShopContext);
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState("idle");
 
@@ -11,6 +13,8 @@ export default function AIAssistant() {
   const [aiReply, setAiReply] = useState("");
   const [intent, setIntent] = useState(null);
   const [currentAction, setCurrentAction] = useState("");
+  const [searchFilters, setSearchFilters] = useState(null);
+  const [searchResults, setSearchResults] = useState([]);
 
   const [supported, setSupported] = useState(true);
 
@@ -114,6 +118,92 @@ export default function AIAssistant() {
     };
   };
 
+  const extractSearchFilters = (text) => {
+    const normalized = text.toLowerCase();
+    const filters = {
+      query: text.trim(),
+      category: "",
+      color: "",
+      maxPrice: "",
+    };
+
+    const categoryMap = [
+      { value: "jacket", terms: ["jacket", "jackets"] },
+      { value: "hoodie", terms: ["hoodie", "hoodies"] },
+      { value: "sweater", terms: ["sweater", "sweaters"] },
+      { value: "shirt", terms: ["shirt", "shirts", "topwear"] },
+      { value: "t-shirt", terms: ["t-shirt", "tee", "tees"] },
+      { value: "pant", terms: ["pant", "pants", "trouser", "trousers", "bottomwear"] },
+      { value: "dress", terms: ["dress", "dresses"] },
+      { value: "saree", terms: ["saree", "sarees"] },
+      { value: "kids", terms: ["kids", "kid"] },
+    ];
+
+    const colorMap = [
+      "black",
+      "white",
+      "blue",
+      "red",
+      "green",
+      "yellow",
+      "pink",
+      "brown",
+      "grey",
+      "gray",
+      "beige",
+      "navy",
+      "maroon",
+      "olive",
+    ];
+
+    const categoryHit = categoryMap.find(({ terms }) =>
+      terms.some((term) => normalized.includes(term)),
+    );
+
+    if (categoryHit) {
+      filters.category = categoryHit.value;
+    }
+
+    const colorHit = colorMap.find((color) => normalized.includes(color));
+    if (colorHit) {
+      filters.color = colorHit;
+    }
+
+    const priceMatch = normalized.match(/(?:under|below|less than|within)\s*(?:rs\.?|₹|rupees)?\s*(\d+(?:,\d{3})*(?:\.\d+)?)/i);
+    if (priceMatch) {
+      filters.maxPrice = Number(priceMatch[1].replace(/,/g, ""));
+    }
+
+    return filters;
+  };
+
+  const filterProducts = (filters) => {
+    if (!filters) return [];
+
+    const query = filters.query.toLowerCase();
+
+    return products.filter((product) => {
+      const name = (product.name || "").toLowerCase();
+      const category = (product.category || "").toLowerCase();
+      const subCategory = (product.subCategory || "").toLowerCase();
+      const description = (product.description || "").toLowerCase();
+      const color = (product.color || "").toLowerCase();
+      const price = Number(product.price || 0);
+
+      const queryMatch =
+        !query ||
+        name.includes(query) ||
+        description.includes(query) ||
+        category.includes(query);
+
+      const categoryMatch = !filters.category || category.includes(filters.category) || subCategory.includes(filters.category);
+      const colorMatch = !filters.color || color.includes(filters.color) || name.includes(filters.color) || description.includes(filters.color);
+      const priceMatch = !filters.maxPrice || price <= filters.maxPrice;
+
+      return queryMatch && categoryMatch && colorMatch && priceMatch;
+    });
+  };
+
   const executeIntentAction = (detectedIntent) => {
     if (!detectedIntent?.type) return;
 
@@ -149,6 +239,7 @@ export default function AIAssistant() {
 
       case "SEARCH_PRODUCT":
         setCurrentAction("Search intent detected");
+        setSearchFilters(extractSearchFilters(detectedIntent.value));
         return;
 
       default:
@@ -304,8 +395,28 @@ export default function AIAssistant() {
           const detectedIntent = detectIntent(text);
           setIntent(detectedIntent);
           executeIntentAction(detectedIntent);
+          const filters = detectedIntent.type === "SEARCH_PRODUCT" ? extractSearchFilters(text) : null;
+          setSearchFilters(filters);
+          const matchingProducts = filters ? filterProducts(filters) : [];
+          setSearchResults(matchingProducts);
 
-          await sendTranscriptToAI(text);
+          if (filters) {
+            setSearch(filters.query);
+            setShowSearch(true);
+            navigate("/collection");
+            setCurrentAction(
+              matchingProducts.length > 0
+                ? `Showing ${matchingProducts.length} matching products`
+                : "No exact match found, showing collection",
+            );
+            setAiReply(
+              matchingProducts.length > 0
+                ? `I found ${matchingProducts.length} matching products.`
+                : "I could not find an exact match, so I opened the collection.",
+            );
+          } else {
+            await sendTranscriptToAI(text);
+          }
         } catch (error) {
           console.log("Voice error:", error);
 
@@ -391,6 +502,18 @@ export default function AIAssistant() {
       .split("_")
       .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
       .join(" ");
+  };
+
+  const getFilterLabel = () => {
+    if (!searchFilters) return "";
+
+    const parts = [];
+
+    if (searchFilters.category) parts.push(searchFilters.category);
+    if (searchFilters.color) parts.push(searchFilters.color);
+    if (searchFilters.maxPrice) parts.push(`under ${searchFilters.maxPrice}`);
+
+    return parts.join(", ");
   };
 
   return (
@@ -680,6 +803,30 @@ bottom:20px;
                 <strong>Action:</strong>
                 <br />
                 {currentAction}
+              </div>
+            )}
+
+            {searchFilters && (
+              <div className="idris-ai-message">
+                <strong>Search:</strong>
+                <br />
+                {getFilterLabel() || searchFilters.query}
+              </div>
+            )}
+
+            {searchResults.length > 0 && (
+              <div className="idris-ai-message" style={{ textAlign: "left" }}>
+                <strong>Matching Products:</strong>
+                <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+                  {searchResults.slice(0, 3).map((product) => (
+                    <div key={product._id} style={{ padding: 8, borderRadius: 10, background: "#f8f4ef" }}>
+                      <div style={{ fontWeight: 600 }}>{product.name}</div>
+                      <div style={{ fontSize: 12, color: "#666" }}>
+                        {product.category} {product.subCategory ? `• ${product.subCategory}` : ""} • ${product.price}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
 
