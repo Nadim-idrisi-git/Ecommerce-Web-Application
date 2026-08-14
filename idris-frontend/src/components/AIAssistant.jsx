@@ -5,7 +5,13 @@ import { ShopContext } from "../context/ShopContext";
 
 export default function AIAssistant() {
   const navigate = useNavigate();
-  const { products, setSearch, setShowSearch } = useContext(ShopContext);
+  const {
+    products,
+    setSearch,
+    setShowSearch,
+    setVoiceSort,
+    setVoiceCategory,
+  } = useContext(ShopContext);
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState("idle");
 
@@ -31,9 +37,11 @@ export default function AIAssistant() {
   const pauseTimerRef = useRef(null);
   const listeningSessionRef = useRef(false);
   const hadSpeechRef = useRef(false);
+  const voiceModeRef = useRef("recognition");
 
   const recordingMimeTypeRef = useRef("");
   const speechSynthesisRef = useRef(null);
+  const availableVoicesRef = useRef([]);
   const memoryRef = useRef({
     lastCategory: "",
     lastColor: "",
@@ -43,14 +51,23 @@ export default function AIAssistant() {
   });
 
   const allowedActions = {
+    OPEN_HOME: true,
+    OPEN_ABOUT: true,
+    OPEN_CONTACT: true,
     OPEN_CART: true,
     OPEN_COLLECTION: true,
+    OPEN_PROFILE: true,
     LOGIN: true,
     TRACK_ORDER: true,
     SHOW_OFFERS: true,
     SEARCH_PRODUCT: true,
     RECOMMEND_PRODUCT: true,
+    SORT_PRODUCTS: true,
   };
+
+  const isBraveBrowser = () =>
+    Boolean(window.navigator.brave) ||
+    /Brave/i.test(window.navigator.userAgent || "");
 
   useEffect(() => {
     const hasMediaDevices =
@@ -72,7 +89,47 @@ export default function AIAssistant() {
 
   useEffect(() => {
     speechSynthesisRef.current = window.speechSynthesis || null;
+
+    const syncVoices = () => {
+      availableVoicesRef.current = window.speechSynthesis?.getVoices?.() || [];
+    };
+
+    syncVoices();
+    window.speechSynthesis?.addEventListener?.("voiceschanged", syncVoices);
+
+    return () => {
+      window.speechSynthesis?.removeEventListener?.("voiceschanged", syncVoices);
+    };
   }, []);
+
+  const getPreferredVoice = () => {
+    const voices = availableVoicesRef.current || [];
+
+    if (!voices.length) return null;
+
+    const preferredNames = [
+      "Google UK English Female",
+      "Google UK English Male",
+      "Google US English",
+      "Microsoft Aria Online (Natural) - English (United States)",
+      "Microsoft Zira Online (Natural) - English (United States)",
+      "Samantha",
+      "Daniel",
+      "Karen",
+    ];
+
+    const voice = preferredNames
+      .map((name) => voices.find((item) => item.name === name))
+      .find(Boolean);
+
+    if (voice) return voice;
+
+    const englishVoice = voices.find((item) =>
+      /en(-|_)?(IN|US|GB)?/i.test(item.lang || ""),
+    );
+
+    return englishVoice || voices[0] || null;
+  };
 
   const getAudioExtension = (mimeType) => {
     if (mimeType.includes("webm")) return "webm";
@@ -104,6 +161,7 @@ export default function AIAssistant() {
     utterance.rate = 1;
     utterance.pitch = 1;
     utterance.volume = 1;
+    utterance.voice = getPreferredVoice();
 
     utterance.onstart = () => setIsSpeaking(true);
     utterance.onend = () => setIsSpeaking(false);
@@ -124,10 +182,6 @@ export default function AIAssistant() {
     pauseTimerRef.current = setTimeout(() => {
       if (!listeningSessionRef.current) return;
       if (!hadSpeechRef.current) return;
-
-      speakText("Hmm.");
-      pushHistory("assistant", "Hmm.");
-      setAiReply((prev) => prev || "Hmm.");
     }, 5000);
   };
 
@@ -193,6 +247,18 @@ export default function AIAssistant() {
 
     const matchers = [
       {
+        type: "OPEN_HOME",
+        values: ["open home", "go home", "home page", "go to home", "go to homepage", "homepage"],
+      },
+      {
+        type: "OPEN_ABOUT",
+        values: ["open about", "about page", "go to about", "about us"],
+      },
+      {
+        type: "OPEN_CONTACT",
+        values: ["open contact", "contact page", "go to contact", "contact us", "support page"],
+      },
+      {
         type: "OPEN_CART",
         values: ["open cart", "show cart", "go to cart", "cart"],
       },
@@ -204,7 +270,12 @@ export default function AIAssistant() {
           "show all products",
           "browse products",
           "show products",
+          "shop now",
         ],
+      },
+      {
+        type: "OPEN_PROFILE",
+        values: ["open profile", "my profile", "profile page", "go to profile", "open my profile"],
       },
       {
         type: "TRACK_ORDER",
@@ -240,6 +311,20 @@ export default function AIAssistant() {
       {
         type: "DATABASE_MODIFY",
         values: ["database", "collection schema", "change database", "db update"],
+      },
+      {
+        type: "SORT_PRODUCTS",
+        values: [
+          "sort products",
+          "sort by price",
+          "price wise",
+          "latest",
+          "newest",
+          "category wise",
+          "sort by category",
+          "low to high",
+          "high to low",
+        ],
       },
     ];
 
@@ -420,6 +505,127 @@ export default function AIAssistant() {
 
   const detectRecommendationIntent = (text) => isRecommendationRequest(text);
 
+  const detectSortIntent = (text) => {
+    const normalized = text.toLowerCase().trim();
+
+    if (
+      ["low to high", "low-high", "cheapest", "price ascending", "sort by price low to high"].some((phrase) =>
+        normalized.includes(phrase),
+      )
+    ) {
+      return { type: "SORT_PRODUCTS", value: "low-high" };
+    }
+
+    if (
+      ["high to low", "high-low", "expensive", "price descending", "sort by price high to low"].some((phrase) =>
+        normalized.includes(phrase),
+      )
+    ) {
+      return { type: "SORT_PRODUCTS", value: "high-low" };
+    }
+
+    if (["latest", "newest", "recent", "new arrivals", "sort by latest"].some((phrase) =>
+      normalized.includes(phrase),
+    )) {
+      return { type: "SORT_PRODUCTS", value: "newest" };
+    }
+
+    if (["category wise", "sort by category", "category", "by category"].some((phrase) =>
+      normalized.includes(phrase),
+    )) {
+      return { type: "SORT_PRODUCTS", value: "category" };
+    }
+
+    return null;
+  };
+
+  const startMediaRecorderSession = async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+
+    mediaStreamRef.current = stream;
+
+    const mimeType = getSupportedMimeType();
+
+    recordingMimeTypeRef.current = mimeType;
+
+    const recorder = new MediaRecorder(
+      stream,
+
+      mimeType ? { mimeType } : undefined,
+    );
+
+    mediaRecorderRef.current = recorder;
+    audioChunksRef.current = [];
+
+    recorder.onstart = () => {
+      setStatus("listening");
+      speakText("How can I assist you?");
+    };
+
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        audioChunksRef.current.push(event.data);
+      }
+    };
+
+    recorder.onstop = async () => {
+      const audioBlob = new Blob(audioChunksRef.current, {
+        type: recordingMimeTypeRef.current || recorder.mimeType || "audio/webm",
+      });
+
+      audioChunksRef.current = [];
+
+      if (!audioBlob.size) {
+        setStatus("error");
+        return;
+      }
+
+      try {
+        setStatus("transcribing");
+        let assistantResponse = "";
+
+        const formData = new FormData();
+
+        formData.append("audio", audioBlob, `idris.${getAudioExtension(audioBlob.type)}`);
+
+        const { backendUrl, apiConfigError } = getApiConfig();
+
+        if (!backendUrl) {
+          throw new Error(apiConfigError || "Backend URL is not configured");
+        }
+
+        const response = await fetch(`${backendUrl}/api/voice/transcribe`, {
+          method: "POST",
+          body: formData,
+        });
+
+        const data = await response.json();
+
+        if (!data.success) {
+          throw new Error(data.message);
+        }
+
+        assistantResponse = await processVoiceText(data.transcript.trim());
+        if (!assistantResponse) {
+          assistantResponse = "";
+        }
+      } catch (error) {
+        setVoiceError(
+          "We could not understand the audio or connect to voice services. You can try again.",
+        );
+        setStatus("error");
+      }
+    };
+
+    recorder.start(250);
+  };
+
   const processVoiceText = async (text) => {
     const normalizedText = text.trim();
     if (!normalizedText) return;
@@ -429,6 +635,14 @@ export default function AIAssistant() {
 
     const memoryFilters = deriveMemoryContext(normalizedText);
     const detectedIntent = detectIntent(normalizedText);
+    const sortCommandResponse = handleSortCommand(normalizedText);
+
+    if (sortCommandResponse) {
+      setIntent({ type: "SORT_PRODUCTS", value: normalizedText });
+      pushHistory("assistant", sortCommandResponse);
+      return sortCommandResponse;
+    }
+
     setIntent(detectedIntent);
     executeIntentAction(detectedIntent);
     const filters =
@@ -476,6 +690,8 @@ export default function AIAssistant() {
   };
 
   const ensureRecognition = () => {
+    if (isBraveBrowser()) return null;
+
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -536,6 +752,17 @@ export default function AIAssistant() {
 
       if (event.error === "no-speech") {
         schedulePauseResponse();
+        return;
+      }
+
+      if (voiceModeRef.current === "recognition") {
+        recognition.stop();
+        recognitionRef.current = null;
+        voiceModeRef.current = "media";
+        startMediaRecorderSession().catch(() => {
+          setVoiceError("Voice recognition is temporarily unavailable. Please try again.");
+          setStatus("error");
+        });
         return;
       }
 
@@ -604,6 +831,27 @@ export default function AIAssistant() {
     setSecurityNotice("");
 
     switch (detectedIntent.type) {
+      case "OPEN_HOME":
+        setCurrentAction("Opening home");
+        navigate("/");
+        setAiReply("Opening home.");
+        speakText("Opening home.");
+        return;
+
+      case "OPEN_ABOUT":
+        setCurrentAction("Opening about");
+        navigate("/about");
+        setAiReply("Opening about page.");
+        speakText("Opening about page.");
+        return;
+
+      case "OPEN_CONTACT":
+        setCurrentAction("Opening contact");
+        navigate("/contact");
+        setAiReply("Opening contact page.");
+        speakText("Opening contact page.");
+        return;
+
       case "OPEN_CART":
         setCurrentAction("Opening cart");
         navigate("/cart");
@@ -616,6 +864,13 @@ export default function AIAssistant() {
         navigate("/collection");
         setAiReply("Showing the collection.");
         speakText("Showing the collection.");
+        return;
+
+      case "OPEN_PROFILE":
+        setCurrentAction("Opening profile");
+        navigate("/profile");
+        setAiReply("Opening your profile.");
+        speakText("Opening your profile.");
         return;
 
       case "LOGIN":
@@ -647,6 +902,10 @@ export default function AIAssistant() {
         setCurrentAction("Recommendation intent detected");
         return;
 
+      case "SORT_PRODUCTS":
+        setCurrentAction("Sort intent detected");
+        return;
+
       default:
         setCurrentAction("");
     }
@@ -674,6 +933,58 @@ export default function AIAssistant() {
     setShowSearch(false);
     navigate("/collection");
     return responseText;
+  };
+
+  const handleSortCommand = (text) => {
+    const sortIntent = detectSortIntent(text);
+
+    if (!sortIntent) return "";
+
+    if (sortIntent.value === "category") {
+      const categoryKeyword = [
+        "men",
+        "women",
+        "kids",
+        "jacket",
+        "hoodie",
+        "sweater",
+        "shirt",
+        "pants",
+        "dress",
+        "saree",
+        "winterwear",
+        "topwear",
+        "bottomwear",
+      ].find((word) => text.toLowerCase().includes(word));
+
+      if (categoryKeyword) {
+        setVoiceCategory(
+          ["men", "women", "kids"].includes(categoryKeyword)
+            ? categoryKeyword.charAt(0).toUpperCase() + categoryKeyword.slice(1)
+            : categoryKeyword.charAt(0).toUpperCase() + categoryKeyword.slice(1),
+        );
+      }
+
+      setVoiceSort("relevant");
+      navigate("/collection");
+      setAiReply("Showing items by category.");
+      speakText("Showing items by category.");
+      return "Showing items by category.";
+    }
+
+    setVoiceSort(sortIntent.value);
+    navigate("/collection");
+
+    const spoken =
+      sortIntent.value === "low-high"
+        ? "Sorting products from low to high price."
+        : sortIntent.value === "high-low"
+        ? "Sorting products from high to low price."
+        : "Showing the latest products.";
+
+    setAiReply(spoken);
+    speakText(spoken);
+    return spoken;
   };
 
   const sendTranscriptToAI = async (text) => {
@@ -740,13 +1051,14 @@ export default function AIAssistant() {
       resetVoiceState();
       clearPauseTimer();
       hadSpeechRef.current = false;
+      voiceModeRef.current = isBraveBrowser() ? "media" : "recognition";
       setTranscript("");
       setAiReply("");
       setIntent(null);
 
       setStatus("requesting-mic");
 
-      const recognition = ensureRecognition();
+      const recognition = voiceModeRef.current === "recognition" ? ensureRecognition() : null;
 
       if (recognition) {
         listeningSessionRef.current = true;
@@ -755,101 +1067,13 @@ export default function AIAssistant() {
         try {
           recognition.start();
         } catch {
-          // Recognition may already be running.
+          voiceModeRef.current = "media";
+          await startMediaRecorderSession();
         }
         return;
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-
-      mediaStreamRef.current = stream;
-
-      const mimeType = getSupportedMimeType();
-
-      recordingMimeTypeRef.current = mimeType;
-
-      const recorder = new MediaRecorder(
-        stream,
-
-        mimeType ? { mimeType } : undefined,
-      );
-
-      mediaRecorderRef.current = recorder;
-
-      audioChunksRef.current = [];
-
-      recorder.onstart = () => {
-        setStatus("listening");
-        speakText("How can I assist you?");
-      };
-
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      recorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, {
-          type:
-            recordingMimeTypeRef.current || recorder.mimeType || "audio/webm",
-        });
-
-        audioChunksRef.current = [];
-
-        if (!audioBlob.size) {
-          setStatus("error");
-          return;
-        }
-
-        try {
-          setStatus("transcribing");
-          let assistantResponse = "";
-
-          const formData = new FormData();
-
-          formData.append(
-            "audio",
-            audioBlob,
-            `idris.${getAudioExtension(audioBlob.type)}`,
-          );
-
-          const { backendUrl, apiConfigError } = getApiConfig();
-
-          if (!backendUrl) {
-            throw new Error(apiConfigError || "Backend URL is not configured");
-          }
-
-          const response = await fetch(`${backendUrl}/api/voice/transcribe`, {
-            method: "POST",
-            body: formData,
-          });
-
-          const data = await response.json();
-
-          if (!data.success) {
-            throw new Error(data.message);
-          }
-
-          assistantResponse = await processVoiceText(data.transcript.trim());
-          if (!assistantResponse) {
-            assistantResponse = "";
-          }
-        } catch (error) {
-          setVoiceError(
-            "We could not understand the audio or connect to voice services. You can try again.",
-          );
-          setStatus("error");
-        }
-      };
-
-      recorder.start(250);
+      await startMediaRecorderSession();
     } catch (error) {
       setVoiceError("Microphone access could not start. Please check permissions and try again.");
       setStatus("permission-denied");

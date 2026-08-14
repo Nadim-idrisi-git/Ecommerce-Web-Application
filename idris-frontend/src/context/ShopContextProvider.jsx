@@ -18,6 +18,8 @@ const ShopContextProvider = (props) => {
   const [cartItems, setCartItems] = useState({});
   const [paymentMethod, setPaymentMethod] = useState("COD");
   const [products, setProducts] = useState([]);
+  const [voiceSort, setVoiceSort] = useState("");
+  const [voiceCategory, setVoiceCategory] = useState("");
   const [token, setToken] = useState(localStorage.getItem("token") || "");
   const [user, setUser] = useState(null);
   const [orders, setOrders] = useState([]);
@@ -362,6 +364,10 @@ const getSubtotal = () => {
     getSubtotal,
     paymentMethod,
 setPaymentMethod,
+    voiceSort,
+    setVoiceSort,
+    voiceCategory,
+    setVoiceCategory,
     backendUrl,
     apiConfigError,
     navigate,

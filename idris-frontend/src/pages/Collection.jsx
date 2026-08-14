@@ -6,7 +6,7 @@ import ProductItem from '../components/ProductItem'
 
 const Collection = () => {
 
-  const { products, search, showSearch } = useContext(ShopContext)
+  const { products, search, showSearch, voiceSort, setVoiceSort, voiceCategory, setVoiceCategory } = useContext(ShopContext)
 
   const [showFilter,setShowFilter] = useState(false)
   const [filterProducts,setFilterProducts] = useState([])
@@ -99,6 +99,21 @@ const Collection = () => {
   useEffect(()=>{
     sortProduct()
   },[sortType])
+
+  useEffect(() => {
+    if (voiceSort) {
+      setSortType(voiceSort)
+      setVoiceSort("")
+    }
+  }, [voiceSort, setVoiceSort])
+
+  useEffect(() => {
+    if (voiceCategory) {
+      setCategory([voiceCategory])
+      setVoiceCategory("")
+      setShowFilter(true)
+    }
+  }, [voiceCategory, setVoiceCategory])
 
 
 
