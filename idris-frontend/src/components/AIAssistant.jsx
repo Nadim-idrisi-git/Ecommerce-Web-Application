@@ -550,8 +550,6 @@ export default function AIAssistant() {
       setStatus("idle");
       return data.reply;
     } catch (error) {
-      console.log("AI reply error:", error);
-
       setAiReply("Sorry, I am unable to answer right now.");
       speakText("Sorry, I am unable to answer right now.");
 
@@ -611,8 +609,6 @@ export default function AIAssistant() {
       audioChunksRef.current = [];
 
       recorder.onstart = () => {
-        console.log("Recording started");
-
         setStatus("listening");
       };
 
@@ -713,8 +709,6 @@ export default function AIAssistant() {
 
           pushHistory("assistant", assistantResponse || currentAction || "Processed command");
         } catch (error) {
-          console.log("Voice error:", error);
-
           setVoiceError(
             "We could not understand the audio or connect to voice services. You can try again.",
           );
@@ -724,8 +718,6 @@ export default function AIAssistant() {
 
       recorder.start(250);
     } catch (error) {
-      console.log("Mic error", error);
-
       setVoiceError("Microphone access could not start. Please check permissions and try again.");
       setStatus("permission-denied");
     }
