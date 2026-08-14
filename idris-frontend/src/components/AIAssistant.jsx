@@ -18,6 +18,7 @@ export default function AIAssistant() {
   const [recommendationQuery, setRecommendationQuery] = useState("");
   const [recommendations, setRecommendations] = useState([]);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [conversationHistory, setConversationHistory] = useState([]);
 
   const [supported, setSupported] = useState(true);
 
@@ -27,6 +28,13 @@ export default function AIAssistant() {
 
   const recordingMimeTypeRef = useRef("");
   const speechSynthesisRef = useRef(null);
+  const memoryRef = useRef({
+    lastCategory: "",
+    lastColor: "",
+    lastQuery: "",
+    lastRecommendationQuery: "",
+    lastProducts: [],
+  });
 
   useEffect(() => {
     const hasMediaDevices =
@@ -86,6 +94,58 @@ export default function AIAssistant() {
     utterance.onerror = () => setIsSpeaking(false);
 
     speechSynthesisRef.current?.speak(utterance);
+  };
+
+  const pushHistory = (role, content) => {
+    setConversationHistory((prev) => [
+      ...prev.slice(-11),
+      { role, content, timestamp: Date.now() },
+    ]);
+  };
+
+  const deriveMemoryContext = (text) => {
+    const normalized = text.toLowerCase().trim();
+    const memory = memoryRef.current;
+
+    const hasFollowUpColor =
+      ["black ones", "white ones", "blue ones", "red ones", "green ones", "pink ones", "brown ones"].some((phrase) =>
+        normalized.includes(phrase),
+      ) || /^(black|white|blue|red|green|pink|brown)\s+ones?$/.test(normalized);
+
+    const hasFollowUpCategory =
+      ["those", "same ones", "more like that", "similar ones", "more products", "more like this"].some((phrase) =>
+        normalized.includes(phrase),
+      );
+
+    if (hasFollowUpColor || hasFollowUpCategory) {
+      return {
+        query: text.trim(),
+        category: memory.lastCategory || "",
+        color:
+          (normalized.match(/^(black|white|blue|red|green|pink|brown|yellow|grey|gray|beige|navy|maroon|olive)/)?.[1] || memory.lastColor || ""),
+        maxPrice: "",
+      };
+    }
+
+    return null;
+  };
+
+  const rememberSearchContext = (filters, results, query) => {
+    memoryRef.current = {
+      ...memoryRef.current,
+      lastCategory: filters?.category || memoryRef.current.lastCategory || "",
+      lastColor: filters?.color || memoryRef.current.lastColor || "",
+      lastQuery: query || memoryRef.current.lastQuery || "",
+      lastProducts: results || memoryRef.current.lastProducts || [],
+    };
+  };
+
+  const rememberRecommendationContext = (query, picks) => {
+    memoryRef.current = {
+      ...memoryRef.current,
+      lastRecommendationQuery: query || memoryRef.current.lastRecommendationQuery || "",
+      lastProducts: picks || memoryRef.current.lastProducts || [],
+    };
   };
 
   const detectIntent = (text) => {
@@ -384,6 +444,10 @@ export default function AIAssistant() {
   const handleRecommendationQuery = (text) => {
     const keywords = getRecommendationKeywords(text);
     const picks = scoreRecommendations(keywords);
+    const responseText =
+      picks.length > 0
+        ? `I recommend ${picks.map((item) => item.name).join(", ")}.`
+        : "I could not find a strong recommendation, so I opened the catalog.";
 
     setRecommendationQuery(text.trim());
     setRecommendations(picks);
@@ -392,19 +456,13 @@ export default function AIAssistant() {
         ? `Showing ${picks.length} recommended products`
         : "No strong recommendation match found",
     );
-    setAiReply(
-      picks.length > 0
-        ? `I recommend ${picks.map((item) => item.name).join(", ")}.`
-        : "I could not find a strong recommendation, so I opened the catalog.",
-    );
-    speakText(
-      picks.length > 0
-        ? `I recommend ${picks.map((item) => item.name).join(", ")}.`
-        : "I could not find a strong recommendation, so I opened the catalog.",
-    );
+    setAiReply(responseText);
+    speakText(responseText);
+    rememberRecommendationContext(text.trim(), picks);
     setSearch("");
     setShowSearch(false);
     navigate("/collection");
+    return responseText;
   };
 
   const sendTranscriptToAI = async (text) => {
@@ -439,6 +497,7 @@ export default function AIAssistant() {
       speakText(data.reply);
 
       setStatus("idle");
+      return data.reply;
     } catch (error) {
       console.log("AI reply error:", error);
 
@@ -446,6 +505,7 @@ export default function AIAssistant() {
       speakText("Sorry, I am unable to answer right now.");
 
       setStatus("error");
+      return "Sorry, I am unable to answer right now.";
     }
   };
 
@@ -525,6 +585,7 @@ export default function AIAssistant() {
 
         try {
           setStatus("transcribing");
+          let assistantResponse = "";
 
           const formData = new FormData();
 
@@ -554,15 +615,26 @@ export default function AIAssistant() {
           const text = data.transcript.trim();
 
           setTranscript(text);
+          pushHistory("user", text);
+
+          const memoryFilters = deriveMemoryContext(text);
           const detectedIntent = detectIntent(text);
           setIntent(detectedIntent);
           executeIntentAction(detectedIntent);
-          const filters = detectedIntent.type === "SEARCH_PRODUCT" ? extractSearchFilters(text) : null;
+          const filters =
+            detectedIntent.type === "SEARCH_PRODUCT"
+              ? extractSearchFilters(text)
+              : memoryFilters || null;
           setSearchFilters(filters);
           const matchingProducts = filters ? filterProducts(filters) : [];
           setSearchResults(matchingProducts);
 
           if (filters) {
+            assistantResponse =
+              matchingProducts.length > 0
+                ? `I found ${matchingProducts.length} matching products.`
+                : "I could not find an exact match, so I opened the collection.";
+
             setSearch(filters.query);
             setShowSearch(true);
             navigate("/collection");
@@ -571,16 +643,16 @@ export default function AIAssistant() {
                 ? `Showing ${matchingProducts.length} matching products`
                 : "No exact match found, showing collection",
             );
-            setAiReply(
-              matchingProducts.length > 0
-                ? `I found ${matchingProducts.length} matching products.`
-                : "I could not find an exact match, so I opened the collection.",
-            );
+            setAiReply(assistantResponse);
+            rememberSearchContext(filters, matchingProducts, filters.query);
+            speakText(assistantResponse);
           } else if (isRecommendationRequest(text)) {
-            handleRecommendationQuery(text);
+            assistantResponse = handleRecommendationQuery(text);
           } else {
-            await sendTranscriptToAI(text);
+            assistantResponse = await sendTranscriptToAI(text);
           }
+
+          pushHistory("assistant", assistantResponse || currentAction || "Processed command");
         } catch (error) {
           console.log("Voice error:", error);
 
@@ -635,6 +707,14 @@ export default function AIAssistant() {
 
     setOpen(false);
   };
+
+  useEffect(() => {
+    if (!conversationHistory.length) return;
+    const latest = conversationHistory[conversationHistory.length - 1];
+    if (latest?.role === "assistant") {
+      return;
+    }
+  }, [conversationHistory]);
 
   const getStatusText = () => {
     switch (status) {
@@ -738,7 +818,7 @@ left:50%;
 
 right:auto;
 
-bottom:30px;
+bottom:70px;
 
 transform:translateX(-50%);
 
@@ -980,6 +1060,20 @@ bottom:20px;
                 <strong>Action:</strong>
                 <br />
                 {currentAction}
+              </div>
+            )}
+
+            {conversationHistory.length > 0 && (
+              <div className="idris-ai-message" style={{ textAlign: "left" }}>
+                <strong>Memory:</strong>
+                <div style={{ marginTop: 8, display: "grid", gap: 6, maxHeight: 140, overflow: "auto" }}>
+                  {conversationHistory.slice(-4).map((item, index) => (
+                    <div key={`${item.timestamp}-${index}`} style={{ fontSize: 12, color: "#444" }}>
+                      <span style={{ fontWeight: 600, textTransform: "capitalize" }}>{item.role}:</span>{" "}
+                      {item.content}
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
 
