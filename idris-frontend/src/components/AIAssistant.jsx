@@ -19,6 +19,7 @@ export default function AIAssistant() {
   const [recommendations, setRecommendations] = useState([]);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [conversationHistory, setConversationHistory] = useState([]);
+  const [securityNotice, setSecurityNotice] = useState("");
 
   const [supported, setSupported] = useState(true);
 
@@ -35,6 +36,16 @@ export default function AIAssistant() {
     lastRecommendationQuery: "",
     lastProducts: [],
   });
+
+  const allowedActions = {
+    OPEN_CART: true,
+    OPEN_COLLECTION: true,
+    LOGIN: true,
+    TRACK_ORDER: true,
+    SHOW_OFFERS: true,
+    SEARCH_PRODUCT: true,
+    RECOMMEND_PRODUCT: true,
+  };
 
   useEffect(() => {
     const hasMediaDevices =
@@ -188,6 +199,18 @@ export default function AIAssistant() {
           "i need",
           "looking for",
         ],
+      },
+      {
+        type: "DELETE_PRODUCT",
+        values: ["delete product", "remove product", "erase product", "wipe product"],
+      },
+      {
+        type: "UPDATE_PRODUCT",
+        values: ["update product", "edit product", "modify product", "change product"],
+      },
+      {
+        type: "DATABASE_MODIFY",
+        values: ["database", "collection schema", "change database", "db update"],
       },
     ];
 
@@ -366,6 +389,8 @@ export default function AIAssistant() {
     ].some((phrase) => normalized.includes(phrase));
   };
 
+  const detectRecommendationIntent = (text) => isRecommendationRequest(text);
+
   const filterProducts = (filters) => {
     if (!filters) return [];
 
@@ -395,6 +420,22 @@ export default function AIAssistant() {
 
   const executeIntentAction = (detectedIntent) => {
     if (!detectedIntent?.type) return;
+
+    if (!allowedActions[detectedIntent.type]) {
+      const blockedMessage =
+        "I cannot do that action. I can only help with browsing, search, and navigation.";
+
+      setSecurityNotice(
+        "Blocked unsafe action: the assistant is not allowed to delete, update, or modify database data.",
+      );
+      setCurrentAction("Blocked unsafe action");
+      setAiReply(blockedMessage);
+      speakText(blockedMessage);
+      setStatus("error");
+      return;
+    }
+
+    setSecurityNotice("");
 
     switch (detectedIntent.type) {
       case "OPEN_CART":
@@ -434,6 +475,10 @@ export default function AIAssistant() {
       case "SEARCH_PRODUCT":
         setCurrentAction("Search intent detected");
         setSearchFilters(extractSearchFilters(detectedIntent.value));
+        return;
+
+      case "RECOMMEND_PRODUCT":
+        setCurrentAction("Recommendation intent detected");
         return;
 
       default:
@@ -629,7 +674,14 @@ export default function AIAssistant() {
           const matchingProducts = filters ? filterProducts(filters) : [];
           setSearchResults(matchingProducts);
 
-          if (filters) {
+          if (
+            detectedIntent.type === "DELETE_PRODUCT" ||
+            detectedIntent.type === "UPDATE_PRODUCT" ||
+            detectedIntent.type === "DATABASE_MODIFY"
+          ) {
+            assistantResponse =
+              "I cannot do that action. I can only help with browsing, search, and navigation.";
+          } else if (filters) {
             assistantResponse =
               matchingProducts.length > 0
                 ? `I found ${matchingProducts.length} matching products.`
@@ -646,7 +698,7 @@ export default function AIAssistant() {
             setAiReply(assistantResponse);
             rememberSearchContext(filters, matchingProducts, filters.query);
             speakText(assistantResponse);
-          } else if (isRecommendationRequest(text)) {
+          } else if (detectRecommendationIntent(text)) {
             assistantResponse = handleRecommendationQuery(text);
           } else {
             assistantResponse = await sendTranscriptToAI(text);
@@ -735,6 +787,9 @@ export default function AIAssistant() {
 
       case "error":
         return "Something went wrong";
+
+      case "blocked":
+        return "Action blocked";
 
       case "speaking":
         return "Speaking";
@@ -1060,6 +1115,14 @@ bottom:20px;
                 <strong>Action:</strong>
                 <br />
                 {currentAction}
+              </div>
+            )}
+
+            {securityNotice && (
+              <div className="idris-ai-message" style={{ borderColor: "#d39c9c", background: "#fff5f5" }}>
+                <strong>Security:</strong>
+                <br />
+                {securityNotice}
               </div>
             )}
 
