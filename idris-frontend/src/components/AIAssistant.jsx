@@ -20,6 +20,7 @@ export default function AIAssistant() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [conversationHistory, setConversationHistory] = useState([]);
   const [securityNotice, setSecurityNotice] = useState("");
+  const [voiceError, setVoiceError] = useState("");
 
   const [supported, setSupported] = useState(true);
 
@@ -105,6 +106,11 @@ export default function AIAssistant() {
     utterance.onerror = () => setIsSpeaking(false);
 
     speechSynthesisRef.current?.speak(utterance);
+  };
+
+  const resetVoiceState = () => {
+    setVoiceError("");
+    setSecurityNotice("");
   };
 
   const pushHistory = (role, content) => {
@@ -573,6 +579,7 @@ export default function AIAssistant() {
 
   const startRecording = async () => {
     try {
+      resetVoiceState();
       setTranscript("");
       setAiReply("");
       setIntent(null);
@@ -708,6 +715,9 @@ export default function AIAssistant() {
         } catch (error) {
           console.log("Voice error:", error);
 
+          setVoiceError(
+            "We could not understand the audio or connect to voice services. You can try again.",
+          );
           setStatus("error");
         }
       };
@@ -716,6 +726,7 @@ export default function AIAssistant() {
     } catch (error) {
       console.log("Mic error", error);
 
+      setVoiceError("Microphone access could not start. Please check permissions and try again.");
       setStatus("permission-denied");
     }
   };
@@ -760,13 +771,15 @@ export default function AIAssistant() {
     setOpen(false);
   };
 
-  useEffect(() => {
-    if (!conversationHistory.length) return;
-    const latest = conversationHistory[conversationHistory.length - 1];
-    if (latest?.role === "assistant") {
-      return;
-    }
-  }, [conversationHistory]);
+  const retryVoiceSession = () => {
+    stopRecording();
+    stopSpeaking();
+    setStatus("idle");
+    setVoiceError("");
+    setTimeout(() => {
+      startRecording();
+    }, 250);
+  };
 
   const getStatusText = () => {
     switch (status) {
@@ -790,6 +803,9 @@ export default function AIAssistant() {
 
       case "blocked":
         return "Action blocked";
+
+      case "unsupported":
+        return "Voice not supported";
 
       case "speaking":
         return "Speaking";
@@ -1126,6 +1142,22 @@ bottom:20px;
               </div>
             )}
 
+            {voiceError && (
+              <div className="idris-ai-message" style={{ borderColor: "#d9c28f", background: "#fff9ef" }}>
+                <strong>Voice:</strong>
+                <br />
+                {voiceError}
+              </div>
+            )}
+
+            {status === "unsupported" && (
+              <div className="idris-ai-message" style={{ borderColor: "#d9c28f", background: "#fff9ef" }}>
+                <strong>Compatibility:</strong>
+                <br />
+                This browser does not support the full voice assistant flow. Please use Chrome, Edge, or Brave.
+              </div>
+            )}
+
             {conversationHistory.length > 0 && (
               <div className="idris-ai-message" style={{ textAlign: "left" }}>
                 <strong>Memory:</strong>
@@ -1192,6 +1224,27 @@ bottom:20px;
 
             {!transcript && !aiReply && (
               <div className="idris-ai-message">Speak something...</div>
+            )}
+
+            {(status === "error" || status === "permission-denied") && (
+              <button
+                type="button"
+                onClick={retryVoiceSession}
+                style={{
+                  pointerEvents: "auto",
+                  border: "none",
+                  borderRadius: 999,
+                  background: "#1a1a1a",
+                  color: "#fff",
+                  padding: "10px 14px",
+                  fontSize: 12,
+                  cursor: "pointer",
+                  width: "fit-content",
+                  margin: "0 auto",
+                }}
+              >
+                Retry Voice
+              </button>
             )}
           </div>
         )}
