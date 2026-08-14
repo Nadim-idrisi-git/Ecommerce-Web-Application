@@ -27,6 +27,10 @@ export default function AIAssistant() {
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const audioChunksRef = useRef([]);
+  const recognitionRef = useRef(null);
+  const pauseTimerRef = useRef(null);
+  const listeningSessionRef = useRef(false);
+  const hadSpeechRef = useRef(false);
 
   const recordingMimeTypeRef = useRef("");
   const speechSynthesisRef = useRef(null);
@@ -106,6 +110,25 @@ export default function AIAssistant() {
     utterance.onerror = () => setIsSpeaking(false);
 
     speechSynthesisRef.current?.speak(utterance);
+  };
+
+  const clearPauseTimer = () => {
+    if (pauseTimerRef.current) {
+      clearTimeout(pauseTimerRef.current);
+      pauseTimerRef.current = null;
+    }
+  };
+
+  const schedulePauseResponse = () => {
+    clearPauseTimer();
+    pauseTimerRef.current = setTimeout(() => {
+      if (!listeningSessionRef.current) return;
+      if (!hadSpeechRef.current) return;
+
+      speakText("Hmm.");
+      pushHistory("assistant", "Hmm.");
+      setAiReply((prev) => prev || "Hmm.");
+    }, 5000);
   };
 
   const resetVoiceState = () => {
@@ -397,6 +420,143 @@ export default function AIAssistant() {
 
   const detectRecommendationIntent = (text) => isRecommendationRequest(text);
 
+  const processVoiceText = async (text) => {
+    const normalizedText = text.trim();
+    if (!normalizedText) return;
+
+    setTranscript(normalizedText);
+    pushHistory("user", normalizedText);
+
+    const memoryFilters = deriveMemoryContext(normalizedText);
+    const detectedIntent = detectIntent(normalizedText);
+    setIntent(detectedIntent);
+    executeIntentAction(detectedIntent);
+    const filters =
+      detectedIntent.type === "SEARCH_PRODUCT"
+        ? extractSearchFilters(normalizedText)
+        : memoryFilters || null;
+    setSearchFilters(filters);
+    const matchingProducts = filters ? filterProducts(filters) : [];
+    setSearchResults(matchingProducts);
+
+    let assistantResponse = "";
+
+    if (
+      detectedIntent.type === "DELETE_PRODUCT" ||
+      detectedIntent.type === "UPDATE_PRODUCT" ||
+      detectedIntent.type === "DATABASE_MODIFY"
+    ) {
+      assistantResponse =
+        "I cannot do that action. I can only help with browsing, search, and navigation.";
+    } else if (filters) {
+      assistantResponse =
+        matchingProducts.length > 0
+          ? `I found ${matchingProducts.length} matching products.`
+          : "I could not find an exact match, so I opened the collection.";
+
+      setSearch(filters.query);
+      setShowSearch(true);
+      navigate("/collection");
+      setCurrentAction(
+        matchingProducts.length > 0
+          ? `Showing ${matchingProducts.length} matching products`
+          : "No exact match found, showing collection",
+      );
+      setAiReply(assistantResponse);
+      rememberSearchContext(filters, matchingProducts, filters.query);
+      speakText(assistantResponse);
+    } else if (detectRecommendationIntent(normalizedText)) {
+      assistantResponse = handleRecommendationQuery(normalizedText);
+    } else {
+      assistantResponse = await sendTranscriptToAI(normalizedText);
+    }
+
+    pushHistory("assistant", assistantResponse || currentAction || "Processed command");
+    return assistantResponse;
+  };
+
+  const ensureRecognition = () => {
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) return null;
+
+    if (recognitionRef.current) return recognitionRef.current;
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "en-IN";
+
+    recognition.onstart = () => {
+      setStatus("listening");
+    };
+
+    recognition.onspeechstart = () => {
+      if (isSpeaking) stopSpeaking();
+    };
+
+    recognition.onresult = (event) => {
+      clearPauseTimer();
+
+      let finalText = "";
+      let interimText = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const chunk = result[0]?.transcript || "";
+
+        if (chunk.trim()) hadSpeechRef.current = true;
+
+        if (result.isFinal) {
+          finalText += chunk;
+        } else {
+          interimText += chunk;
+        }
+      }
+
+      const currentText = `${finalText}${interimText}`.trim();
+
+      if (currentText) {
+        if (isSpeaking) stopSpeaking();
+        setTranscript(currentText);
+        schedulePauseResponse();
+      }
+
+      if (finalText.trim()) {
+        processVoiceText(finalText.trim());
+      }
+    };
+
+    recognition.onerror = (event) => {
+      if (event.error === "not-allowed") {
+        setStatus("permission-denied");
+        return;
+      }
+
+      if (event.error === "no-speech") {
+        schedulePauseResponse();
+        return;
+      }
+
+      setVoiceError("Voice recognition is temporarily unavailable. Please try again.");
+      setStatus("error");
+    };
+
+    recognition.onend = () => {
+      if (listeningSessionRef.current) {
+        try {
+          recognition.start();
+        } catch {
+          // Ignore restart races.
+        }
+      }
+    };
+
+    recognitionRef.current = recognition;
+    return recognition;
+  };
+
   const filterProducts = (filters) => {
     if (!filters) return [];
 
@@ -578,11 +738,27 @@ export default function AIAssistant() {
   const startRecording = async () => {
     try {
       resetVoiceState();
+      clearPauseTimer();
+      hadSpeechRef.current = false;
       setTranscript("");
       setAiReply("");
       setIntent(null);
 
       setStatus("requesting-mic");
+
+      const recognition = ensureRecognition();
+
+      if (recognition) {
+        listeningSessionRef.current = true;
+        setStatus("listening");
+        speakText("How can I assist you?");
+        try {
+          recognition.start();
+        } catch {
+          // Recognition may already be running.
+        }
+        return;
+      }
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -610,6 +786,7 @@ export default function AIAssistant() {
 
       recorder.onstart = () => {
         setStatus("listening");
+        speakText("How can I assist you?");
       };
 
       recorder.ondataavailable = (event) => {
@@ -643,16 +820,16 @@ export default function AIAssistant() {
             `idris.${getAudioExtension(audioBlob.type)}`,
           );
 
-      const { backendUrl, apiConfigError } = getApiConfig();
+          const { backendUrl, apiConfigError } = getApiConfig();
 
-      if (!backendUrl) {
-        throw new Error(apiConfigError || "Backend URL is not configured");
-      }
+          if (!backendUrl) {
+            throw new Error(apiConfigError || "Backend URL is not configured");
+          }
 
-      const response = await fetch(`${backendUrl}/api/voice/transcribe`, {
-        method: "POST",
-        body: formData,
-      });
+          const response = await fetch(`${backendUrl}/api/voice/transcribe`, {
+            method: "POST",
+            body: formData,
+          });
 
           const data = await response.json();
 
@@ -660,54 +837,10 @@ export default function AIAssistant() {
             throw new Error(data.message);
           }
 
-          const text = data.transcript.trim();
-
-          setTranscript(text);
-          pushHistory("user", text);
-
-          const memoryFilters = deriveMemoryContext(text);
-          const detectedIntent = detectIntent(text);
-          setIntent(detectedIntent);
-          executeIntentAction(detectedIntent);
-          const filters =
-            detectedIntent.type === "SEARCH_PRODUCT"
-              ? extractSearchFilters(text)
-              : memoryFilters || null;
-          setSearchFilters(filters);
-          const matchingProducts = filters ? filterProducts(filters) : [];
-          setSearchResults(matchingProducts);
-
-          if (
-            detectedIntent.type === "DELETE_PRODUCT" ||
-            detectedIntent.type === "UPDATE_PRODUCT" ||
-            detectedIntent.type === "DATABASE_MODIFY"
-          ) {
-            assistantResponse =
-              "I cannot do that action. I can only help with browsing, search, and navigation.";
-          } else if (filters) {
-            assistantResponse =
-              matchingProducts.length > 0
-                ? `I found ${matchingProducts.length} matching products.`
-                : "I could not find an exact match, so I opened the collection.";
-
-            setSearch(filters.query);
-            setShowSearch(true);
-            navigate("/collection");
-            setCurrentAction(
-              matchingProducts.length > 0
-                ? `Showing ${matchingProducts.length} matching products`
-                : "No exact match found, showing collection",
-            );
-            setAiReply(assistantResponse);
-            rememberSearchContext(filters, matchingProducts, filters.query);
-            speakText(assistantResponse);
-          } else if (detectRecommendationIntent(text)) {
-            assistantResponse = handleRecommendationQuery(text);
-          } else {
-            assistantResponse = await sendTranscriptToAI(text);
+          assistantResponse = await processVoiceText(data.transcript.trim());
+          if (!assistantResponse) {
+            assistantResponse = "";
           }
-
-          pushHistory("assistant", assistantResponse || currentAction || "Processed command");
         } catch (error) {
           setVoiceError(
             "We could not understand the audio or connect to voice services. You can try again.",
@@ -724,6 +857,18 @@ export default function AIAssistant() {
   };
 
   const stopRecording = () => {
+    listeningSessionRef.current = false;
+    hadSpeechRef.current = false;
+    clearPauseTimer();
+
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.abort();
+      } catch {
+        // Ignore stop races.
+      }
+    }
+
     const recorder = mediaRecorderRef.current;
 
     if (recorder && recorder.state !== "inactive") {
