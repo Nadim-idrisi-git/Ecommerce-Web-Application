@@ -1085,44 +1085,13 @@ bottom:20px;
       <div className={`idris-ai-container ${open ? "open" : ""}`}>
         {open && (
           <div className="idris-ai-box">
-              <div className="idris-ai-status">{getStatusText()}</div>
+            <div className="idris-ai-status">{getStatusText()}</div>
 
             {isSpeaking && (
               <div className="idris-ai-message">
                 <strong>Voice:</strong>
                 <br />
                 Speaking out loud
-              </div>
-            )}
-
-            {transcript && (
-              <div className="idris-ai-message">
-                <strong>You:</strong>
-                <br />
-
-                {transcript}
-              </div>
-            )}
-
-            {intent && (
-              <div className="idris-ai-message">
-                <strong>Intent:</strong>
-                <br />
-                {formatIntent(intent.type)}
-                {intent.value && intent.type !== "UNKNOWN" && (
-                  <>
-                    <br />
-                    <span style={{ color: "#6b6b6b" }}>{intent.value}</span>
-                  </>
-                )}
-              </div>
-            )}
-
-            {currentAction && (
-              <div className="idris-ai-message">
-                <strong>Action:</strong>
-                <br />
-                {currentAction}
               </div>
             )}
 
@@ -1150,74 +1119,6 @@ bottom:20px;
               </div>
             )}
 
-            {conversationHistory.length > 0 && (
-              <div className="idris-ai-message" style={{ textAlign: "left" }}>
-                <strong>Memory:</strong>
-                <div style={{ marginTop: 8, display: "grid", gap: 6, maxHeight: 140, overflow: "auto" }}>
-                  {conversationHistory.slice(-4).map((item, index) => (
-                    <div key={`${item.timestamp}-${index}`} style={{ fontSize: 12, color: "#444" }}>
-                      <span style={{ fontWeight: 600, textTransform: "capitalize" }}>{item.role}:</span>{" "}
-                      {item.content}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {searchFilters && (
-              <div className="idris-ai-message">
-                <strong>Search:</strong>
-                <br />
-                {getFilterLabel() || searchFilters.query}
-              </div>
-            )}
-
-            {searchResults.length > 0 && (
-              <div className="idris-ai-message" style={{ textAlign: "left" }}>
-                <strong>Matching Products:</strong>
-                <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
-                  {searchResults.slice(0, 3).map((product) => (
-                    <div key={product._id} style={{ padding: 8, borderRadius: 10, background: "#f8f4ef" }}>
-                      <div style={{ fontWeight: 600 }}>{product.name}</div>
-                      <div style={{ fontSize: 12, color: "#666" }}>
-                        {product.category} {product.subCategory ? `• ${product.subCategory}` : ""} • ${product.price}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {recommendations.length > 0 && (
-              <div className="idris-ai-message" style={{ textAlign: "left" }}>
-                <strong>Recommended For You:</strong>
-                <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
-                  {recommendations.map((product) => (
-                    <div key={product._id} style={{ padding: 8, borderRadius: 10, background: "#f8f4ef" }}>
-                      <div style={{ fontWeight: 600 }}>{product.name}</div>
-                      <div style={{ fontSize: 12, color: "#666" }}>
-                        {product.category} {product.subCategory ? `• ${product.subCategory}` : ""} • ${product.price}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {aiReply && (
-              <div className="idris-ai-message">
-                <strong>IDRIS AI:</strong>
-
-                <br />
-
-                {aiReply}
-              </div>
-            )}
-
-            {!transcript && !aiReply && (
-              <div className="idris-ai-message">Speak something...</div>
-            )}
-
             {(status === "error" || status === "permission-denied") && (
               <button
                 type="button"
@@ -1234,7 +1135,7 @@ bottom:20px;
                   width: "fit-content",
                   margin: "0 auto",
                 }}
-              >
+                >
                 Retry Voice
               </button>
             )}
