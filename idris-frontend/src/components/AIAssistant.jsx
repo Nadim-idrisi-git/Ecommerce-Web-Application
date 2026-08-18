@@ -4,6 +4,19 @@ import { getApiConfig } from "../config/api";
 import { ShopContext } from "../context/ShopContext";
 import { searchProducts } from "../utils/productSearch";
 
+// A hung request (rather than a fast failure) would otherwise leave the
+// assistant stuck in "thinking"/"transcribing" indefinitely.
+const fetchWithTimeout = async (url, options = {}, timeoutMs = 15000) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
 // Maps a route to a short page label the assistant can reason about. Kept
 // deliberately generic - it never carries per-page PII, just "what kind of
 // page is this" for reference resolution and available-action awareness.
@@ -51,6 +64,7 @@ const NAVIGATE_ROUTES = {
   addresses: "/addresses",
   orders: "/orders",
   login: "/login",
+  checkout: "/place-order",
 };
 
 const NAVIGATE_SPOKEN = {
@@ -63,6 +77,18 @@ const NAVIGATE_SPOKEN = {
   addresses: "Opening your saved addresses.",
   orders: "Opening your orders.",
   login: "Taking you to login.",
+  checkout: "Opening checkout.",
+};
+
+// Cart line items are keyed by size, so "small"/"medium"/etc. need to map to
+// the actual size codes the catalog uses.
+const SIZE_ALIASES = {
+  small: "S",
+  medium: "M",
+  large: "L",
+  "extra large": "XL",
+  "extra extra large": "XXL",
+  "double extra large": "XXL",
 };
 
 // Only used when the backend tool-selection call itself fails (offline/network
@@ -98,21 +124,13 @@ const DESTRUCTIVE_PHRASES = [
   "db update",
 ];
 
-const CART_ACTION_PHRASES = [
-  "add to cart",
-  "put in cart",
-  "add item to cart",
-  "put product in cart",
-  "add this to cart",
-  "add this product to cart",
-];
-
 export default function AIAssistant() {
   const navigate = useNavigate();
   const location = useLocation();
   const {
     products,
     cartItems,
+    setCartItemQuantity,
     voiceSearchFilters,
     setSearch,
     setShowSearch,
@@ -123,6 +141,12 @@ export default function AIAssistant() {
     setVoiceProductIds,
     token,
     user,
+    orders,
+    addresses,
+    placeOrder,
+    cancelOrder,
+    currency,
+    delivery_fee,
   } = useContext(ShopContext);
 
   // `user` is already resolved server-side (JWT-verified /api/user/profile) -
@@ -169,6 +193,17 @@ export default function AIAssistant() {
     lastRecommendationQuery: "",
     lastProducts: [],
   });
+
+  // Multi-turn slot-filling / confirm-before-acting state. Two shapes:
+  // { type: "add_to_cart_size", productId, quantity } while waiting for a
+  // size answer, or { type: "confirm", question, declineMessage, onConfirm }
+  // while waiting for yes/no before an irreversible action (place/cancel
+  // order) actually runs. Checked at the top of every new utterance.
+  const pendingActionRef = useRef(null);
+  // Idempotency guard: a confirmed place/cancel order is cleared from
+  // pendingActionRef synchronously before the async call starts, so a
+  // duplicate "yes" arriving while it's still in flight can't double-submit.
+  const isProcessingActionRef = useRef(false);
 
   const isBraveBrowser = () =>
     Boolean(window.navigator.brave) ||
@@ -676,11 +711,36 @@ export default function AIAssistant() {
         .filter(Boolean);
     }
 
+    // Cart/order state is the customer's own data, not page-specific - kept
+    // available regardless of what page they're on so "remove the jacket
+    // from my cart" works while browsing, not just on the cart page itself.
+    const byId = new Map(products.map((product) => [product._id, product]));
+    const cartLines = [];
+    Object.entries(cartItems || {}).forEach(([productId, sizes]) => {
+      const product = byId.get(productId);
+      if (!product) return;
+
+      Object.entries(sizes || {}).forEach(([size, quantity]) => {
+        if (quantity > 0) {
+          cartLines.push({ productId, name: product.name, size, quantity, price: product.price });
+        }
+      });
+    });
+
+    const recentOrders = (orders || []).slice(0, 5).map((order) => ({
+      id: order._id,
+      status: order.status,
+      itemNames: (order.items || []).map((item) => item.name),
+      date: order.date,
+    }));
+
     return {
       page,
       visibleProducts: visibleProducts.slice(0, 12).map(summarizeProductForContext),
       selectedProduct: selectedProduct ? summarizeProductForContext(selectedProduct) : null,
       activeSearch: voiceSearchFilters?.query || "",
+      cartLines: cartLines.slice(0, 20),
+      recentOrders,
       uiOpen: {
         cart: page === "cart",
         checkout: page === "checkout",
@@ -697,10 +757,50 @@ export default function AIAssistant() {
     return DESTRUCTIVE_PHRASES.some((phrase) => normalized.includes(phrase));
   };
 
-  const isCartActionRequest = (text) => {
-    const normalized = text.toLowerCase();
-    return CART_ACTION_PHRASES.some((phrase) => normalized.includes(phrase));
+  // Deterministic yes/no parsing for confirm-before-acting flows (place
+  // order, cancel order) - never trusts the AI's own judgment about whether
+  // consent was given, only a literal reading of the next utterance.
+  const parseYesNo = (text) => {
+    const normalized = text.toLowerCase().trim();
+    if (/^(yes|yeah|yep|yup|sure|confirm|confirmed|go ahead|do it|okay|ok|please do|correct)\b/.test(normalized)) {
+      return "yes";
+    }
+    if (/^(no|nope|nah|cancel|never\s?mind|stop|don'?t)\b/.test(normalized)) {
+      return "no";
+    }
+    return null;
   };
+
+  const parseSizeAnswer = (text, availableSizes) => {
+    const normalized = text.toLowerCase().trim();
+
+    if (/\b(cancel|never\s?mind|forget it|stop|no)\b/.test(normalized)) {
+      return { cancel: true };
+    }
+
+    if (/\b(any size|any|you (choose|pick|decide)|whatever|doesn'?t matter|surprise me)\b/.test(normalized)) {
+      return { autoSelect: true };
+    }
+
+    const directHit = availableSizes.find(
+      (size) => normalized === size.toLowerCase() || normalized.includes(size.toLowerCase()),
+    );
+    if (directHit) return { size: directHit };
+
+    const aliasEntry = Object.entries(SIZE_ALIASES).find(([phrase]) => normalized.includes(phrase));
+    if (aliasEntry) {
+      const mapped = availableSizes.find((size) => size.toLowerCase() === aliasEntry[1].toLowerCase());
+      if (mapped) return { size: mapped };
+    }
+
+    return null;
+  };
+
+  // Finds the product a cart/order-adjacent tool call is referring to,
+  // preferring a resolved id from context over a fuzzy name search.
+  const resolveProductFromArgs = (args, rawText) =>
+    (args.productId && products.find((product) => product._id === args.productId)) ||
+    findProductByQuery(args.query || rawText);
 
   const handleRecommendationQuery = (text) => {
     const keywords = getRecommendationKeywords(text);
@@ -725,6 +825,192 @@ export default function AIAssistant() {
     setVoiceProductIds(picks.map((product) => product._id));
     navigate("/collection");
     return responseText;
+  };
+
+  // Finishes an add-to-cart once a size is known (either given directly,
+  // auto-selected with permission, or answered in the size slot-filling
+  // follow-up). Always tells the customer which size was used.
+  const completeAddToCart = (productId, size, quantity, autoSelected) => {
+    const product = products.find((item) => item._id === productId);
+
+    if (!product) {
+      const spoken = "I could not find that product anymore.";
+      setAiReply(spoken);
+      speakText(spoken);
+      return spoken;
+    }
+
+    const availableSizes = product.sizes || product.size || [];
+    const resolvedSize = size || (availableSizes.length ? availableSizes[0] : "");
+    const currentQuantity = cartItems?.[productId]?.[resolvedSize] || 0;
+
+    setCartItemQuantity(productId, resolvedSize, currentQuantity + (quantity || 1));
+
+    const spoken = autoSelected
+      ? `I added ${product.name} in size ${resolvedSize} to your cart, since any size works for you.`
+      : `I added ${product.name}${resolvedSize ? ` (size ${resolvedSize})` : ""} to your cart.`;
+
+    setCurrentAction(`Added ${product.name} to cart`);
+    setAiReply(spoken);
+    speakText(spoken);
+    return spoken;
+  };
+
+  // Never places an order immediately - computes a confirmation summary
+  // (using only the address label, never full address/phone/email) and
+  // waits for an explicit yes on the next turn. The address itself is read
+  // from context here, in plain JS, and never passed through the AI model.
+  const beginPlaceOrder = () => {
+    const cartEntries = Object.entries(cartItems || {});
+
+    if (!cartEntries.length) {
+      const spoken = "Your cart is empty, so there is nothing to order.";
+      setAiReply(spoken);
+      speakText(spoken);
+      return spoken;
+    }
+
+    const orderItems = [];
+    cartEntries.forEach(([productId, sizes]) => {
+      const product = products.find((item) => item._id === productId);
+      if (!product) return;
+
+      Object.entries(sizes || {}).forEach(([size, quantity]) => {
+        if (quantity > 0) {
+          orderItems.push({
+            productId,
+            name: product.name,
+            price: product.price,
+            image: product.image?.[0],
+            size,
+            quantity,
+          });
+        }
+      });
+    });
+
+    if (!orderItems.length) {
+      const spoken = "Your cart is empty, so there is nothing to order.";
+      setAiReply(spoken);
+      speakText(spoken);
+      return spoken;
+    }
+
+    const defaultAddress = addresses.find((item) => item.isDefault) || addresses[0];
+
+    if (!defaultAddress) {
+      const spoken = "You do not have a saved address yet. Let's go to checkout so you can add one.";
+      setAiReply(spoken);
+      speakText(spoken);
+      navigate("/place-order");
+      return spoken;
+    }
+
+    const subtotal = orderItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    const amount = subtotal + delivery_fee;
+    const itemCount = orderItems.reduce((sum, item) => sum + item.quantity, 0);
+
+    const question = `I'll place a Cash on Delivery order for ${itemCount} item${itemCount > 1 ? "s" : ""}, total ${currency}${amount}, delivered to your ${defaultAddress.label || "default"} address. Should I go ahead? Voice ordering only supports Cash on Delivery - for card or UPI payment, please use checkout directly.`;
+
+    pendingActionRef.current = {
+      type: "confirm",
+      question,
+      declineMessage: "Okay, I won't place the order.",
+      onConfirm: async () => {
+        try {
+          const response = await placeOrder({
+            items: orderItems,
+            amount,
+            address: { ...defaultAddress, addressId: defaultAddress._id },
+            paymentMethod: "COD",
+            source: "assistant",
+          });
+
+          if (response.success) {
+            navigate("/orders");
+            const spoken = `Your order has been placed. Total ${currency}${amount}.`;
+            setCurrentAction("Order placed");
+            setAiReply(spoken);
+            speakText(spoken);
+            return spoken;
+          }
+
+          const spoken = response.message || "I could not place your order. Please try again from checkout.";
+          setCurrentAction("Order placement failed");
+          setAiReply(spoken);
+          speakText(spoken);
+          return spoken;
+        } catch (error) {
+          console.error("Voice place order error:", error);
+          const spoken = "Something went wrong placing your order. Please try again from checkout.";
+          setAiReply(spoken);
+          speakText(spoken);
+          return spoken;
+        }
+      },
+    };
+
+    setCurrentAction("Awaiting order confirmation");
+    setAiReply(question);
+    speakText(question);
+    return question;
+  };
+
+  // Same confirm-then-execute pattern as beginPlaceOrder. cancelOrder()
+  // is the exact same context function the manual "Cancel Order" button
+  // uses, so the backend's own ownership/eligibility checks apply
+  // unchanged regardless of what this client-side pre-check found.
+  const beginCancelOrder = (orderId) => {
+    const cancellableStatuses = ["Order Placed", "Packing"];
+    const order = orders.find((item) => item._id === orderId) || (orders.length === 1 ? orders[0] : null);
+
+    if (!order) {
+      const spoken = "I could not find that order. Please check your orders page.";
+      setAiReply(spoken);
+      speakText(spoken);
+      return spoken;
+    }
+
+    if (!cancellableStatuses.includes(order.status)) {
+      const spoken = `Your order from ${new Date(order.date).toDateString()} is already ${order.status.toLowerCase()} and can no longer be cancelled online. Please contact support.`;
+      setAiReply(spoken);
+      speakText(spoken);
+      return spoken;
+    }
+
+    const itemSummary = (order.items || []).map((item) => item.name).join(", ");
+    const question = `This will cancel your order (${itemSummary}) placed on ${new Date(order.date).toDateString()}. Should I go ahead?`;
+
+    pendingActionRef.current = {
+      type: "confirm",
+      question,
+      declineMessage: "Okay, I won't cancel that order.",
+      onConfirm: async () => {
+        try {
+          const response = await cancelOrder(order._id, "Cancelled by customer", "assistant");
+
+          const spoken = response.success
+            ? (response.message || "Your order has been cancelled.")
+            : (response.message || "I could not cancel that order. Please try again from your orders page.");
+
+          setCurrentAction(response.success ? "Order cancelled" : "Cancel failed");
+          setAiReply(spoken);
+          speakText(spoken);
+          return spoken;
+        } catch (error) {
+          console.error("Voice cancel order error:", error);
+          const spoken = "Something went wrong cancelling your order. Please try again from your orders page.";
+          setAiReply(spoken);
+          speakText(spoken);
+          return spoken;
+        }
+      },
+    };
+
+    setCurrentAction("Awaiting cancellation confirmation");
+    setAiReply(question);
+    speakText(question);
+    return question;
   };
 
   // Single dispatcher for every allowlisted tool, whether it was chosen by
@@ -830,12 +1116,7 @@ export default function AIAssistant() {
       }
 
       case "open_product": {
-        // Prefer a resolved id from the visible-products context (e.g. "the
-        // second one") over a fuzzy name search, which only applies when
-        // the customer named a product that isn't necessarily on screen.
-        const match =
-          (args.productId && products.find((product) => product._id === args.productId)) ||
-          findProductByQuery(args.query || rawText);
+        const match = resolveProductFromArgs(args, rawText);
 
         if (!match) {
           const spoken = `I could not find a product called "${args.query || rawText}".`;
@@ -849,6 +1130,162 @@ export default function AIAssistant() {
         navigate(`/product/${match._id}`);
 
         const spoken = `Opening ${match.name}.`;
+        setAiReply(spoken);
+        speakText(spoken);
+        return spoken;
+      }
+
+      case "add_to_cart": {
+        const product = resolveProductFromArgs(args, rawText);
+
+        if (!product) {
+          const spoken = "I could not find that product to add to your cart.";
+          setAiReply(spoken);
+          speakText(spoken);
+          return spoken;
+        }
+
+        const availableSizes = product.sizes || product.size || [];
+        const requestedSize = (args.size || "").trim();
+
+        if (requestedSize) {
+          const matchedSize = availableSizes.find(
+            (size) => size.toLowerCase() === requestedSize.toLowerCase(),
+          );
+
+          if (!matchedSize) {
+            const spoken = `Size ${requestedSize} is not available for ${product.name}. Available sizes: ${availableSizes.join(", ") || "none"}.`;
+            setCurrentAction("Requested size unavailable");
+            setAiReply(spoken);
+            speakText(spoken);
+            return spoken;
+          }
+
+          return completeAddToCart(product._id, matchedSize, args.quantity || 1, false);
+        }
+
+        if (args.autoSelectSize || availableSizes.length === 0) {
+          return completeAddToCart(product._id, null, args.quantity || 1, Boolean(args.autoSelectSize));
+        }
+
+        // Size required but neither given nor auto-select authorized - ask,
+        // and wait for the answer instead of guessing.
+        const question = `What size would you like for ${product.name}? Available sizes: ${availableSizes.join(", ")}. Or say "any size".`;
+        pendingActionRef.current = {
+          type: "add_to_cart_size",
+          productId: product._id,
+          quantity: args.quantity || 1,
+        };
+        setCurrentAction("Awaiting size selection");
+        setAiReply(question);
+        speakText(question);
+        return question;
+      }
+
+      case "update_cart_quantity": {
+        const product = resolveProductFromArgs(args, rawText);
+
+        if (!product) {
+          const spoken = "I could not find that item in your cart.";
+          setAiReply(spoken);
+          speakText(spoken);
+          return spoken;
+        }
+
+        const cartForProduct = cartItems?.[product._id] || {};
+        const size = args.size || Object.keys(cartForProduct)[0] || "";
+
+        if (!size || !(size in cartForProduct)) {
+          const spoken = `I could not find ${product.name}${args.size ? ` in size ${args.size}` : ""} in your cart.`;
+          setAiReply(spoken);
+          speakText(spoken);
+          return spoken;
+        }
+
+        const targetQuantity = Math.max(0, Math.round(Number(args.quantity) || 0));
+        setCartItemQuantity(product._id, size, targetQuantity);
+
+        const spoken = targetQuantity > 0
+          ? `Updated ${product.name} (size ${size}) to ${targetQuantity}.`
+          : `Removed ${product.name} (size ${size}) from your cart.`;
+
+        setCurrentAction(spoken);
+        setAiReply(spoken);
+        speakText(spoken);
+        return spoken;
+      }
+
+      case "remove_from_cart": {
+        const product = resolveProductFromArgs(args, rawText);
+
+        if (!product) {
+          const spoken = "I could not find that item in your cart.";
+          setAiReply(spoken);
+          speakText(spoken);
+          return spoken;
+        }
+
+        const cartForProduct = cartItems?.[product._id] || {};
+        const sizesInCart = Object.keys(cartForProduct);
+
+        if (sizesInCart.length === 0) {
+          const spoken = `${product.name} is not in your cart.`;
+          setAiReply(spoken);
+          speakText(spoken);
+          return spoken;
+        }
+
+        const targetSizes = args.size
+          ? sizesInCart.filter((size) => size.toLowerCase() === args.size.toLowerCase())
+          : sizesInCart;
+
+        if (targetSizes.length === 0) {
+          const spoken = `${product.name} in size ${args.size} is not in your cart.`;
+          setAiReply(spoken);
+          speakText(spoken);
+          return spoken;
+        }
+
+        targetSizes.forEach((size) => setCartItemQuantity(product._id, size, 0));
+
+        const spoken = `Removed ${product.name}${args.size ? ` (size ${args.size})` : ""} from your cart.`;
+        setCurrentAction(spoken);
+        setAiReply(spoken);
+        speakText(spoken);
+        return spoken;
+      }
+
+      case "place_order":
+        return beginPlaceOrder();
+
+      case "cancel_order":
+        return beginCancelOrder(args.orderId);
+
+      case "track_order": {
+        const order = args.orderId
+          ? orders.find((item) => item._id === args.orderId)
+          : orders.length === 1 ? orders[0] : null;
+
+        if (!order) {
+          if (!orders.length) {
+            const spoken = "You do not have any orders yet.";
+            setAiReply(spoken);
+            speakText(spoken);
+            return spoken;
+          }
+
+          const spoken = "You have multiple orders. Please open your orders page to pick one, or tell me the product it was for.";
+          setAiReply(spoken);
+          speakText(spoken);
+          navigate("/orders");
+          return spoken;
+        }
+
+        navigate(`/track/${order._id}`);
+
+        const itemNames = (order.items || []).map((item) => item.name).join(", ");
+        const spoken = `Your order (${itemNames}) is currently ${order.status}${order.estimatedDelivery ? `, expected by ${order.estimatedDelivery}` : ""}.`;
+        setCurrentAction("Showing order tracking");
         setAiReply(spoken);
         speakText(spoken);
         return spoken;
@@ -953,10 +1390,10 @@ export default function AIAssistant() {
           throw new Error(apiConfigError || "Backend URL is not configured");
         }
 
-        const response = await fetch(`${backendUrl}/api/voice/transcribe`, {
+        const response = await fetchWithTimeout(`${backendUrl}/api/voice/transcribe`, {
           method: "POST",
           body: formData,
-        });
+        }, 30000);
 
         const data = await response.json();
 
@@ -987,6 +1424,74 @@ export default function AIAssistant() {
     setTranscript(normalizedText);
     pushHistory("user", normalizedText);
 
+    // A previous turn is waiting on this exact utterance (a size choice, or
+    // a yes/no before an irreversible action runs) - handle it first,
+    // deterministically, without going through the AI again.
+    if (pendingActionRef.current) {
+      const pending = pendingActionRef.current;
+
+      if (pending.type === "add_to_cart_size") {
+        const product = products.find((item) => item._id === pending.productId);
+        const availableSizes = product?.sizes || product?.size || [];
+        const parsed = parseSizeAnswer(normalizedText, availableSizes);
+
+        pendingActionRef.current = null;
+
+        if (parsed?.cancel) {
+          const spoken = "Okay, I won't add that to your cart.";
+          setAiReply(spoken);
+          speakText(spoken);
+          pushHistory("assistant", spoken);
+          return spoken;
+        }
+
+        if (parsed?.size || parsed?.autoSelect) {
+          const spoken = completeAddToCart(
+            pending.productId,
+            parsed.size || null,
+            pending.quantity,
+            Boolean(parsed.autoSelect),
+          );
+          pushHistory("assistant", spoken);
+          return spoken;
+        }
+
+        // Didn't parse as a size answer - drop the pending state and fall
+        // through to treat this as a new, unrelated utterance.
+      } else if (pending.type === "confirm" && !isProcessingActionRef.current) {
+        const answer = parseYesNo(normalizedText);
+
+        if (answer === "yes") {
+          pendingActionRef.current = null;
+          isProcessingActionRef.current = true;
+
+          try {
+            const spoken = await pending.onConfirm();
+            pushHistory("assistant", spoken);
+            return spoken;
+          } finally {
+            isProcessingActionRef.current = false;
+          }
+        }
+
+        if (answer === "no") {
+          pendingActionRef.current = null;
+          const spoken = pending.declineMessage || "Okay, I won't do that.";
+          setAiReply(spoken);
+          speakText(spoken);
+          pushHistory("assistant", spoken);
+          return spoken;
+        }
+
+        // Unclear answer - ask again rather than silently dropping a
+        // pending order/cancellation, but keep waiting only for this.
+        speakText(pending.question);
+        setAiReply(pending.question);
+        pushHistory("assistant", pending.question);
+        return pending.question;
+      }
+    }
+
     // No tool exists for these on the backend at all - blocked before any
     // AI call so the assistant can never imply it performed the action.
     if (isDestructiveRequest(normalizedText)) {
@@ -1001,15 +1506,6 @@ export default function AIAssistant() {
       speakText(blockedMessage);
       pushHistory("assistant", blockedMessage);
       return blockedMessage;
-    }
-
-    if (isCartActionRequest(normalizedText)) {
-      const message = "I cannot add items to the cart yet. Please use the Add to Cart button.";
-      setCurrentAction("Cart action unsupported");
-      setAiReply(message);
-      speakText(message);
-      pushHistory("assistant", message);
-      return message;
     }
 
     let toolCall = null;
@@ -1160,7 +1656,7 @@ export default function AIAssistant() {
         throw new Error(apiConfigError || "Backend URL is not configured");
       }
 
-      const response = await fetch(`${backendUrl}/api/chat`, {
+      const response = await fetchWithTimeout(`${backendUrl}/api/chat`, {
         method: "POST",
 
         headers: {
@@ -1171,7 +1667,7 @@ export default function AIAssistant() {
         body: JSON.stringify({
           message: text,
         }),
-      });
+      }, 20000);
 
       const data = await response.json();
 
@@ -1207,7 +1703,7 @@ export default function AIAssistant() {
       throw new Error(apiConfigError || "Backend URL is not configured");
     }
 
-    const response = await fetch(`${backendUrl}/api/ai/intent`, {
+    const response = await fetchWithTimeout(`${backendUrl}/api/ai/intent`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -1216,7 +1712,7 @@ export default function AIAssistant() {
         message: text,
         uiContext: getUIContext(),
       }),
-    });
+    }, 15000);
 
     const data = await response.json();
 

@@ -167,6 +167,30 @@ const ShopContextProvider = (props) => {
 
 };
 
+  // Sets a cart line to an exact quantity in a single save (unlike
+  // addToCart/removeFromCart, which move by one and are meant for the +/-
+  // buttons). Used by the assistant for "add N", "make it 3", and removal
+  // (quantity 0), so a single voice instruction is one network call, not N.
+  const setCartItemQuantity = useCallback((itemId, size, quantity) => {
+    const targetQuantity = Math.max(0, Math.min(10, Math.round(Number(quantity) || 0)));
+
+    setCartItems((prev) => {
+      const copy = structuredClone(prev);
+
+      if (targetQuantity <= 0) {
+        if (copy[itemId]) {
+          delete copy[itemId][size];
+          if (Object.keys(copy[itemId]).length === 0) delete copy[itemId];
+        }
+      } else {
+        copy[itemId] = { ...(copy[itemId] || {}), [size]: targetQuantity };
+      }
+
+      saveCart(copy);
+      return copy;
+    });
+  }, [saveCart]);
+
 const getSubtotal = () => {
   let total = 0;
 
@@ -254,14 +278,14 @@ const getSubtotal = () => {
     navigate("/login");
   };
 
-  const placeOrder = useCallback(async ({ items, amount, address, paymentMethod }) => {
+  const placeOrder = useCallback(async ({ items, amount, address, paymentMethod, source }) => {
     if (!backendUrl) {
       throw new Error(apiConfigError || "Backend URL is not configured");
     }
 
     const response = await axios.post(
       backendUrl + "/api/order/place",
-      { items, amount, address, paymentMethod },
+      { items, amount, address, paymentMethod, source },
       authHeaders()
     );
 
@@ -334,11 +358,11 @@ const getSubtotal = () => {
     return response.data;
   }, [backendUrl, apiConfigError, authHeaders]);
 
-  const cancelOrder = useCallback(async (orderId, reason = "Cancelled by customer") => {
+  const cancelOrder = useCallback(async (orderId, reason = "Cancelled by customer", source) => {
     if (!backendUrl) throw new Error(apiConfigError || "Backend URL is not configured");
     const response = await axios.post(
       backendUrl + "/api/order/cancel",
-      { orderId, reason },
+      { orderId, reason, source },
       authHeaders()
     );
 
@@ -372,6 +396,7 @@ const getSubtotal = () => {
     buyNow,
     getCartCount,
     removeFromCart,
+    setCartItemQuantity,
     getSubtotal,
     paymentMethod,
 setPaymentMethod,

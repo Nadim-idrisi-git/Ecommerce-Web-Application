@@ -4,6 +4,21 @@ import Stripe from "stripe";
 import Razorpay from "razorpay";
 import crypto from "crypto";
 
+// Minimal audit trail for security-sensitive actions the AI assistant
+// takes on the customer's behalf - never logs address/payment/contact
+// details, only identifiers needed to trace what happened.
+const auditAssistantAction = (action, req, details = {}) => {
+    if (req.body?.source !== "assistant") return;
+
+    console.log(JSON.stringify({
+        audit: true,
+        action,
+        userId: req.userId,
+        timestamp: Date.now(),
+        ...details,
+    }));
+};
+
 const getStripe = () => {
     if (!process.env.STRIPE_SECRET_KEY) {
         throw new Error("STRIPE_SECRET_KEY is missing");
@@ -149,6 +164,7 @@ const placeOrder = async (req, res) => {
 
         if (paymentMethod === "COD") {
             await userModel.findByIdAndUpdate(req.userId, { cartData: {} });
+            auditAssistantAction("place_order", req, { orderId: order._id.toString(), amount, paymentMethod });
             return res.json({ success: true, message: "Order placed successfully", order, clearCart: true });
         }
 
@@ -447,6 +463,8 @@ const cancelUserOrder = async (req, res) => {
             cancelledBy: "user",
             reason: reason || "Cancelled by customer"
         });
+
+        auditAssistantAction("cancel_order", req, { orderId: order._id.toString() });
 
         res.json({ success: true, message: "Order cancelled successfully", order });
     } catch (error) {

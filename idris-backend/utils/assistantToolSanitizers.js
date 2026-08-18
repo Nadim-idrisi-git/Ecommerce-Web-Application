@@ -51,4 +51,62 @@ export const assistantToolSanitizers = {
     if (!productId && !query) return null;
     return { productId, query };
   },
+
+  add_to_cart: (args = {}) => {
+    const productId = asString(args.productId).slice(0, 100);
+    const query = asString(args.query).slice(0, 200);
+    if (!productId && !query) return null;
+
+    const quantityNumber = Number(args.quantity);
+
+    return {
+      productId,
+      query,
+      size: asString(args.size).slice(0, 20),
+      quantity: Number.isFinite(quantityNumber) && quantityNumber > 0
+        ? Math.min(Math.round(quantityNumber), 5)
+        : 1,
+      autoSelectSize: Boolean(args.autoSelectSize),
+    };
+  },
+
+  update_cart_quantity: (args = {}) => {
+    const productId = asString(args.productId).slice(0, 100);
+    const query = asString(args.query).slice(0, 200);
+    if (!productId && !query) return null;
+
+    const quantityNumber = Number(args.quantity);
+    if (!Number.isFinite(quantityNumber) || quantityNumber < 0) return null;
+
+    return {
+      productId,
+      query,
+      size: asString(args.size).slice(0, 20),
+      quantity: Math.min(Math.round(quantityNumber), 10),
+    };
+  },
+
+  remove_from_cart: (args = {}) => {
+    const productId = asString(args.productId).slice(0, 100);
+    const query = asString(args.query).slice(0, 200);
+    if (!productId && !query) return null;
+
+    return {
+      productId,
+      query,
+      size: asString(args.size).slice(0, 20),
+    };
+  },
+
+  place_order: () => ({}),
+
+  cancel_order: (args = {}) => {
+    const orderId = asString(args.orderId).slice(0, 100);
+    if (!orderId) return null;
+    return { orderId };
+  },
+
+  track_order: (args = {}) => ({
+    orderId: asString(args.orderId).slice(0, 100),
+  }),
 };

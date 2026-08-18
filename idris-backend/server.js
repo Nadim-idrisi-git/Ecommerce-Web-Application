@@ -13,6 +13,9 @@ import intentRouter from "./routes/intentRoute.js";
 // App config
 const app = express()
 const port = process.env.PORT || 4000
+// Needed for req.ip to reflect the real client behind Vercel's proxy,
+// which the assistant rate limiter relies on.
+app.set('trust proxy', 1)
 const defaultAllowedOrigins = [
   "https://idris-topaz.vercel.app",
   "https://idris-frontend-ten.vercel.app",

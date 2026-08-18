@@ -44,6 +44,8 @@ export const detectAIIntent = async (req, res) => {
       visibleProducts: [],
       selectedProduct: null,
       activeSearch: "",
+      cartLines: [],
+      recentOrders: [],
       uiOpen: {},
     };
 
@@ -53,25 +55,46 @@ export const detectAIIntent = async (req, res) => {
 You are the action router for the IDRIS ecommerce website.
 
 Call exactly one of the available tools if the customer's message clearly
-asks for browsing, searching, recommendations, sorting, or navigation.
+asks for browsing, searching, recommendations, sorting, navigation, cart
+changes, checkout, placing an order, tracking an order, or cancelling an
+order.
 
-Current UI context (what the customer is actually looking at right now -
-use it to resolve references like "this", "that one", "the second one",
-"this product" to a specific id in visibleProducts/selectedProduct):
+Current UI context (what the customer is actually looking at right now,
+their current cart contents, and their recent orders - use it to resolve
+references like "this", "that one", "the second one", "my order", "it" to
+a specific id in visibleProducts/selectedProduct/cartLines/recentOrders):
 ${JSON.stringify(safeUIContext)}
 
-If the customer's message references a specific item ambiguously (e.g.
-"open this", "add the second one") and you cannot confidently tell which
-item they mean from the UI context above, do NOT call a tool - instead
-reply with one short clarifying question that names the visible options.
+If the customer's message references a specific item, cart line, or order
+ambiguously (e.g. "open this", "add the second one", "cancel my order" when
+there is more than one order) and you cannot confidently tell which one
+they mean from the UI context above, do NOT call a tool - instead reply
+with one short clarifying question that names the visible options.
+
+Cart rules: never call add_to_cart/update_cart_quantity/remove_from_cart
+unless the customer explicitly asked for that change in this message -
+never proactively because a product was shown, viewed, or recommended.
+Only set autoSelectSize to true if the customer explicitly said something
+like "any size" or "you choose" - never guess a size otherwise, and never
+invent a size that isn't a real option for that product.
+
+Order rules: place_order and cancel_order never take effect immediately -
+the application always asks the customer to explicitly confirm afterward.
+So call the tool as soon as the customer's request is clear; do not ask
+"are you sure" yourself first. For cancel_order specifically, only call it
+when the order is unambiguous (an id from recentOrders, or the customer
+clearly names the one order they mean) - guessing which order is not
+allowed, ask instead.
 
 For any other message that doesn't match a tool and isn't an ambiguous
-item reference (general questions, greetings, store policy, small talk),
-do NOT call a tool and do NOT try to answer it yourself - reply with
-exactly the single word ${NO_REPLY_SENTINEL} and nothing else.
+reference needing clarification (general questions, greetings, store
+policy, small talk), do NOT call a tool and do NOT try to answer it
+yourself - reply with exactly the single word ${NO_REPLY_SENTINEL} and
+nothing else.
 
-Never invent a tool or arguments that are not declared. Never attempt to
-delete, update, add, or otherwise modify any data - no such tool exists.
+Never invent a tool or arguments that are not declared. There is no tool
+to modify prices, inventory, product data, or another customer's data -
+never imply you can do any of that.
 
 Customer message:
 ${message}
