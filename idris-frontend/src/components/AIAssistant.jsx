@@ -177,6 +177,11 @@ export default function AIAssistant() {
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const audioChunksRef = useRef([]);
+  // Teardown for the MediaRecorder-path voice activity monitor (see
+  // startVoiceActivityMonitor) - that path has no native "user started
+  // talking" event the way SpeechRecognition does, so barge-in there needs
+  // its own lightweight mic-level watcher.
+  const vadCleanupRef = useRef(null);
   const recognitionRef = useRef(null);
   const pauseTimerRef = useRef(null);
   const listeningSessionRef = useRef(false);
@@ -203,6 +208,13 @@ export default function AIAssistant() {
     lastQuery: "",
     lastRecommendationQuery: "",
     lastProducts: [],
+    // Rolling log of what the customer has searched for/done this session
+    // (most recent last), sent to /api/ai/intent on every turn so the model
+    // can resolve follow-ups like "cheaper ones than that" or "add the one
+    // I looked at earlier" - things the current on-screen UI context alone
+    // wouldn't capture. Session-only: reset on reload/tab close, not stored
+    // anywhere, not tied to the account.
+    activityLog: [],
   });
 
   // Multi-turn slot-filling / confirm-before-acting state. Two shapes:
@@ -240,6 +252,9 @@ export default function AIAssistant() {
       }
 
       mediaRecorderRef.current = null;
+
+      vadCleanupRef.current?.();
+      vadCleanupRef.current = null;
 
       if (mediaStreamRef.current) {
         mediaStreamRef.current.getTracks().forEach((track) => track.stop());
@@ -341,6 +356,65 @@ export default function AIAssistant() {
     if (mimeType.includes("ogg")) return "ogg";
 
     return "webm";
+  };
+
+  // MediaRecorder (the Brave/fallback voice path) has no equivalent of
+  // SpeechRecognition's onspeechstart event, so barge-in there needs its own
+  // watcher: a lightweight, separate analyser tap on the same mic stream
+  // that just watches volume and cuts the assistant off the instant the
+  // visitor starts talking, independent of the actual recording/transcript
+  // pipeline. Returns a cleanup function.
+  const startVoiceActivityMonitor = (stream) => {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (typeof AudioContextClass === "undefined") return () => {};
+
+    let audioContext;
+    try {
+      audioContext = new AudioContextClass();
+    } catch {
+      return () => {};
+    }
+
+    const source = audioContext.createMediaStreamSource(stream);
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 512;
+    source.connect(analyser);
+
+    const buffer = new Uint8Array(analyser.frequencyBinCount);
+    const VOLUME_THRESHOLD = 0.035;
+    let rafId = null;
+    let stopped = false;
+
+    const tick = () => {
+      if (stopped) return;
+
+      analyser.getByteTimeDomainData(buffer);
+
+      let sumSquares = 0;
+      for (let i = 0; i < buffer.length; i += 1) {
+        const normalized = (buffer[i] - 128) / 128;
+        sumSquares += normalized * normalized;
+      }
+
+      if (Math.sqrt(sumSquares / buffer.length) > VOLUME_THRESHOLD) {
+        stopSpeaking();
+      }
+
+      rafId = requestAnimationFrame(tick);
+    };
+
+    tick();
+
+    return () => {
+      stopped = true;
+      if (rafId) cancelAnimationFrame(rafId);
+      try {
+        source.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+      audioContext.close().catch(() => {});
+    };
   };
 
   const SPEECH_SAMPLE_RATE = 24000;
@@ -581,6 +655,17 @@ export default function AIAssistant() {
       lastRecommendationQuery:
         query || memoryRef.current.lastRecommendationQuery || "",
       lastProducts: picks || memoryRef.current.lastProducts || [],
+    };
+  };
+
+  const MAX_ACTIVITY_LOG = 8;
+
+  const recordActivity = (summary) => {
+    if (!summary) return;
+
+    memoryRef.current = {
+      ...memoryRef.current,
+      activityLog: [...memoryRef.current.activityLog, summary].slice(-MAX_ACTIVITY_LOG),
     };
   };
 
@@ -1217,7 +1302,17 @@ export default function AIAssistant() {
   // Single dispatcher for every allowlisted tool, whether it was chosen by
   // Gemini (via /api/ai/intent) or by the offline local fallback matcher.
   // `arguments` here are whatever the backend already sanitized/validated.
+  // Every tool call's spoken confirmation already doubles as a good,
+  // human-readable summary of what happened - this is the single choke
+  // point all tool executions pass through, so it's also where the session
+  // activity log is built for recentActivity (see getAssistantTool).
   const runTool = (tool, args = {}, rawText = "") => {
+    const spoken = runToolInner(tool, args, rawText);
+    recordActivity(spoken);
+    return spoken;
+  };
+
+  const runToolInner = (tool, args = {}, rawText = "") => {
     setSecurityNotice("");
 
     switch (tool) {
@@ -1536,6 +1631,8 @@ export default function AIAssistant() {
     });
 
     mediaStreamRef.current = stream;
+    vadCleanupRef.current?.();
+    vadCleanupRef.current = startVoiceActivityMonitor(stream);
 
     const mimeType = getSupportedMimeType();
 
@@ -1625,13 +1722,26 @@ export default function AIAssistant() {
     setTranscript(normalizedText);
     pushHistory("user", normalizedText);
 
+    // If the previous turn was the assistant asking a clarifying question
+    // (ambiguous reference - "add the second one" with several products on
+    // screen), carry that exchange into this call so the model resolves the
+    // follow-up answer in context instead of treating it as a brand new,
+    // unrelated utterance. Populated below, consumed by getAssistantTool().
+    let clarificationHistory = null;
+
     // A previous turn is waiting on this exact utterance (a size choice, or
     // a yes/no before an irreversible action runs) - handle it first,
     // deterministically, without going through the AI again.
     if (pendingActionRef.current) {
       const pending = pendingActionRef.current;
 
-      if (pending.type === "add_to_cart_size") {
+      if (pending.type === "clarification") {
+        pendingActionRef.current = null;
+        clarificationHistory = pending.history;
+        // Falls through to the normal tool-call flow below, now carrying
+        // history - still passes through the destructive-phrase guard and
+        // local fallback like any other utterance.
+      } else if (pending.type === "add_to_cart_size") {
         const product = products.find((item) => item._id === pending.productId);
         const availableSizes = product?.sizes || product?.size || [];
         const parsed = parseSizeAnswer(normalizedText, availableSizes);
@@ -1712,7 +1822,7 @@ export default function AIAssistant() {
     let toolCall = null;
 
     try {
-      toolCall = await getAssistantTool(normalizedText);
+      toolCall = await getAssistantTool(normalizedText, clarificationHistory || []);
     } catch (error) {
       console.error("AI tool selection error:", error);
       // Offline/network fallback has no UI context to work with, so it
@@ -1729,11 +1839,20 @@ export default function AIAssistant() {
       // The model had live UI context but couldn't confidently resolve an
       // ambiguous reference (e.g. "open this") - ask the clarifying
       // question it produced instead of guessing or handing off to the
-      // context-blind general chatbot.
+      // context-blind general chatbot. Remember the exchange so the next
+      // utterance is understood as the answer to this exact question.
       assistantResponse = toolCall.reply;
       setCurrentAction("Clarification requested");
       setAiReply(assistantResponse);
       speakText(assistantResponse);
+      pendingActionRef.current = {
+        type: "clarification",
+        history: [
+          ...(clarificationHistory || []),
+          { role: "user", content: normalizedText },
+          { role: "assistant", content: assistantResponse },
+        ].slice(-6),
+      };
     } else {
       // No tool matched and no clarification needed - general conversation,
       // hand off to the catalog-aware chatbot.
@@ -1767,8 +1886,15 @@ export default function AIAssistant() {
       setStatus("listening");
     };
 
+    // Barge-in: cut the assistant off the instant the user starts talking,
+    // even mid-sentence. This is unconditional (not gated on an `isSpeaking`
+    // check) deliberately - `ensureRecognition()` only ever runs once and
+    // caches the recognition object, so a closure here over the `isSpeaking`
+    // state variable would freeze at whatever it was when recognition was
+    // first created (effectively always false) and never fire again.
+    // stopSpeaking() is a safe no-op when nothing is currently playing.
     recognition.onspeechstart = () => {
-      if (isSpeaking) stopSpeaking();
+      stopSpeaking();
     };
 
     recognition.onresult = (event) => {
@@ -1793,7 +1919,7 @@ export default function AIAssistant() {
       const currentText = `${finalText}${interimText}`.trim();
 
       if (currentText) {
-        if (isSpeaking) stopSpeaking();
+        stopSpeaking();
         setTranscript(currentText);
         schedulePauseResponse();
       }
@@ -1895,9 +2021,17 @@ export default function AIAssistant() {
   // references like "this one". Returns { tool: null, reply } when the
   // model needs to ask a clarifying question, or { tool: null, reply: null }
   // for general conversation the chat endpoint should handle instead.
+  // `history` carries the prior ambiguous request + clarifying question when
+  // this call is answering one (see pendingActionRef "clarification" in
+  // processVoiceText) so the model can resolve the follow-up in context
+  // instead of seeing it as a brand new, unrelated utterance. recentActivity
+  // is the session's rolling log of past searches/commands (memoryRef),
+  // always sent, so the model can resolve follow-ups that reference
+  // something earlier in the conversation even when it's no longer what's
+  // on screen (e.g. "cheaper ones than what I searched before").
   // Throws on network/config failure so the caller can fall back to
   // localFallbackTool.
-  const getAssistantTool = async (text) => {
+  const getAssistantTool = async (text, history = []) => {
     const { backendUrl, apiConfigError } = getApiConfig();
 
     if (!backendUrl) {
@@ -1912,6 +2046,8 @@ export default function AIAssistant() {
       body: JSON.stringify({
         message: text,
         uiContext: getUIContext(),
+        history,
+        recentActivity: memoryRef.current.activityLog,
       }),
     }, 15000);
 
@@ -2001,6 +2137,9 @@ export default function AIAssistant() {
     }
 
     mediaRecorderRef.current = null;
+
+    vadCleanupRef.current?.();
+    vadCleanupRef.current = null;
 
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop());
