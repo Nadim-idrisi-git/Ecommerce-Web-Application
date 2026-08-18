@@ -107,13 +107,21 @@ export const assistantTools = [
   },
   {
     name: "open_product",
-    description: "Open the detail page of one specific product the customer names.",
+    description:
+      "Open the detail page of one specific product the customer names or references (e.g. 'this one', 'the second one').",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        query: { type: Type.STRING, description: "The product name (or close match) the customer asked for." },
+        productId: {
+          type: Type.STRING,
+          description:
+            "The id of the product, taken from visibleProducts/selectedProduct in the UI context, when the customer refers to something currently on screen. Leave empty otherwise.",
+        },
+        query: {
+          type: Type.STRING,
+          description: "The product name (or close match) when the customer names a product not currently visible.",
+        },
       },
-      required: ["query"],
     },
   },
 ];

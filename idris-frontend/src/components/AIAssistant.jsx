@@ -1,8 +1,42 @@
 import { useContext, useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { getApiConfig } from "../config/api";
 import { ShopContext } from "../context/ShopContext";
 import { searchProducts } from "../utils/productSearch";
+
+// Maps a route to a short page label the assistant can reason about. Kept
+// deliberately generic - it never carries per-page PII, just "what kind of
+// page is this" for reference resolution and available-action awareness.
+const PAGE_BY_PATH = [
+  { test: (p) => p === "/", page: "home" },
+  { test: (p) => p === "/collection", page: "collection" },
+  { test: (p) => p.startsWith("/product/"), page: "product" },
+  { test: (p) => p === "/cart", page: "cart" },
+  { test: (p) => p === "/place-order", page: "checkout" },
+  { test: (p) => p === "/orders", page: "orders" },
+  { test: (p) => p.startsWith("/track/"), page: "track_order" },
+  { test: (p) => p === "/addresses", page: "addresses" },
+  { test: (p) => p === "/profile", page: "profile" },
+  { test: (p) => p === "/login", page: "login" },
+  { test: (p) => p === "/about", page: "about" },
+  { test: (p) => p === "/contact", page: "contact" },
+];
+
+const getPageForPath = (pathname) =>
+  PAGE_BY_PATH.find(({ test }) => test(pathname))?.page || "other";
+
+// Only these fields ever leave the browser as "visible product" context -
+// never description text (which could theoretically be edited by an admin
+// to include something unexpected) and never anything from cart/order/user
+// records beyond product identity.
+const summarizeProductForContext = (product) => ({
+  id: product._id,
+  name: product.name,
+  category: product.category,
+  subCategory: product.subCategory,
+  price: product.price,
+  bestseller: Boolean(product.bestseller),
+});
 
 // Every action the assistant can take lives here. The backend (/api/ai/intent)
 // declares the exact same tool names/schemas to Gemini's function calling, so
@@ -75,13 +109,18 @@ const CART_ACTION_PHRASES = [
 
 export default function AIAssistant() {
   const navigate = useNavigate();
+  const location = useLocation();
   const {
     products,
+    cartItems,
+    voiceSearchFilters,
     setSearch,
     setShowSearch,
     setVoiceSort,
     setVoiceCategory,
     setVoiceSearchFilters,
+    voiceProductIds,
+    setVoiceProductIds,
     token,
     user,
   } = useContext(ShopContext);
@@ -584,6 +623,75 @@ export default function AIAssistant() {
     return scored[0]?.product || null;
   };
 
+  // What's currently visible on the collection page, approximated the same
+  // way Collection.jsx itself decides what to render: the assistant's own
+  // last curated result set if one exists, else the current search filters,
+  // else the general catalog. Known limitation: manual checkbox/sort
+  // selections made by clicking (not by voice) aren't reflected here, since
+  // that state lives locally inside the Collection component.
+  const getVisibleCollectionProducts = () => {
+    if (voiceProductIds?.length) {
+      const byId = new Map(products.map((product) => [product._id, product]));
+      return voiceProductIds.map((id) => byId.get(id)).filter(Boolean);
+    }
+
+    const filters = voiceSearchFilters || {};
+    const hasFilter = Boolean(
+      (filters.query || "").trim() ||
+      filters.category ||
+      filters.color ||
+      (filters.maxPrice !== null && filters.maxPrice !== undefined && filters.maxPrice !== "")
+    );
+
+    return hasFilter ? searchProducts(products, filters) : products;
+  };
+
+  // A structured, PII-redacted snapshot of what the customer is looking at
+  // right now - sent to the backend so it can resolve references like "this
+  // one" or "the second one". Deliberately never includes address/phone/
+  // email/payment data, even implicitly: pages that could show that (orders,
+  // addresses, profile, checkout) only ever contribute their page name and
+  // an open/closed flag, nothing else.
+  const getUIContext = () => {
+    const page = getPageForPath(location.pathname);
+    const productId = page === "product" ? location.pathname.split("/product/")[1] : "";
+    const selectedProduct = productId
+      ? products.find((product) => product._id === productId) || null
+      : null;
+
+    let visibleProducts = [];
+
+    if (selectedProduct) {
+      visibleProducts = [selectedProduct];
+    } else if (page === "collection") {
+      visibleProducts = getVisibleCollectionProducts();
+    } else if (page === "home") {
+      const bestsellers = products.filter((product) => product.bestseller).slice(0, 5);
+      const latest = products.slice().sort((a, b) => b.date - a.date).slice(0, 10);
+      visibleProducts = [...bestsellers, ...latest];
+    } else if (page === "cart") {
+      const byId = new Map(products.map((product) => [product._id, product]));
+      visibleProducts = Object.keys(cartItems || {})
+        .map((id) => byId.get(id))
+        .filter(Boolean);
+    }
+
+    return {
+      page,
+      visibleProducts: visibleProducts.slice(0, 12).map(summarizeProductForContext),
+      selectedProduct: selectedProduct ? summarizeProductForContext(selectedProduct) : null,
+      activeSearch: voiceSearchFilters?.query || "",
+      uiOpen: {
+        cart: page === "cart",
+        checkout: page === "checkout",
+        orders: page === "orders" || page === "track_order",
+        productDetail: page === "product",
+        addresses: page === "addresses",
+        profile: page === "profile",
+      },
+    };
+  };
+
   const isDestructiveRequest = (text) => {
     const normalized = text.toLowerCase();
     return DESTRUCTIVE_PHRASES.some((phrase) => normalized.includes(phrase));
@@ -612,6 +720,9 @@ export default function AIAssistant() {
     rememberRecommendationContext(text.trim(), picks);
     setSearch("");
     setShowSearch(false);
+    // So the collection page shows exactly what was announced (not the full
+    // catalog), and so "the second one" resolves correctly next turn.
+    setVoiceProductIds(picks.map((product) => product._id));
     navigate("/collection");
     return responseText;
   };
@@ -652,6 +763,7 @@ export default function AIAssistant() {
           color: filters.color,
           maxPrice: filters.maxPrice || null,
         });
+        setVoiceProductIds(matchingProducts.map((product) => product._id));
         setSearch(filters.query);
         setShowSearch(true);
         navigate("/collection");
@@ -718,7 +830,12 @@ export default function AIAssistant() {
       }
 
       case "open_product": {
-        const match = findProductByQuery(args.query || rawText);
+        // Prefer a resolved id from the visible-products context (e.g. "the
+        // second one") over a fuzzy name search, which only applies when
+        // the customer named a product that isn't necessarily on screen.
+        const match =
+          (args.productId && products.find((product) => product._id === args.productId)) ||
+          findProductByQuery(args.query || rawText);
 
         if (!match) {
           const spoken = `I could not find a product called "${args.query || rawText}".`;
@@ -901,16 +1018,28 @@ export default function AIAssistant() {
       toolCall = await getAssistantTool(normalizedText);
     } catch (error) {
       console.error("AI tool selection error:", error);
-      toolCall = localFallbackTool(normalizedText);
+      // Offline/network fallback has no UI context to work with, so it
+      // can't ask a clarifying question - it can only match a tool or not.
+      const fallback = localFallbackTool(normalizedText);
+      toolCall = fallback ? { ...fallback, reply: null } : null;
     }
 
     let assistantResponse = "";
 
     if (toolCall?.tool) {
       assistantResponse = runTool(toolCall.tool, toolCall.arguments || {}, normalizedText);
+    } else if (toolCall?.reply) {
+      // The model had live UI context but couldn't confidently resolve an
+      // ambiguous reference (e.g. "open this") - ask the clarifying
+      // question it produced instead of guessing or handing off to the
+      // context-blind general chatbot.
+      assistantResponse = toolCall.reply;
+      setCurrentAction("Clarification requested");
+      setAiReply(assistantResponse);
+      speakText(assistantResponse);
     } else {
-      // No tool matched (or the model chose not to call one) - hand off to
-      // the general conversational assistant instead.
+      // No tool matched and no clarification needed - general conversation,
+      // hand off to the catalog-aware chatbot.
       assistantResponse = await sendTranscriptToAI(normalizedText);
     }
 
@@ -1064,10 +1193,13 @@ export default function AIAssistant() {
     }
   };
 
-  // Calls the backend's allowlisted tool-selection endpoint. Returns null
-  // when the model didn't choose any tool (i.e. this is general conversation,
-  // not an actionable request) - throws on network/config failure so the
-  // caller can fall back to localFallbackTool.
+  // Calls the backend's allowlisted tool-selection endpoint, including a
+  // redacted snapshot of what's currently on screen so it can resolve
+  // references like "this one". Returns { tool: null, reply } when the
+  // model needs to ask a clarifying question, or { tool: null, reply: null }
+  // for general conversation the chat endpoint should handle instead.
+  // Throws on network/config failure so the caller can fall back to
+  // localFallbackTool.
   const getAssistantTool = async (text) => {
     const { backendUrl, apiConfigError } = getApiConfig();
 
@@ -1082,6 +1214,7 @@ export default function AIAssistant() {
       },
       body: JSON.stringify({
         message: text,
+        uiContext: getUIContext(),
       }),
     });
 
@@ -1091,7 +1224,11 @@ export default function AIAssistant() {
       throw new Error(data.message || "AI tool selection failed");
     }
 
-    return data.tool ? { tool: data.tool, arguments: data.arguments || {} } : null;
+    return {
+      tool: data.tool || null,
+      arguments: data.arguments || {},
+      reply: data.reply || null,
+    };
   };
 
   const getSupportedMimeType = () => {

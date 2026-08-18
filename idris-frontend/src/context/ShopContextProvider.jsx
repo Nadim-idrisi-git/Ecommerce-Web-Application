@@ -27,6 +27,11 @@ const ShopContextProvider = (props) => {
   color: "",
   maxPrice: null,
 });
+  // The exact set of product ids the assistant most recently surfaced
+  // (via search or recommendation), so the Collection page can display
+  // precisely what was announced instead of re-deriving an approximation,
+  // and so the assistant can accurately answer "the second one" next turn.
+  const [voiceProductIds, setVoiceProductIds] = useState([]);
   const [user, setUser] = useState(null);
   const [orders, setOrders] = useState([]);
   const [addresses, setAddresses] = useState([]);
@@ -393,6 +398,8 @@ setPaymentMethod,
     setDefaultAddress,
     voiceSearchFilters,
 setVoiceSearchFilters,
+    voiceProductIds,
+    setVoiceProductIds,
   };
 
   return (

@@ -46,8 +46,9 @@ export const assistantToolSanitizers = {
   },
 
   open_product: (args = {}) => {
+    const productId = asString(args.productId).slice(0, 100);
     const query = asString(args.query).slice(0, 200);
-    if (!query) return null;
-    return { query };
+    if (!productId && !query) return null;
+    return { productId, query };
   },
 };

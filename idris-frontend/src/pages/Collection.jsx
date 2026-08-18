@@ -7,7 +7,7 @@ import { searchProducts } from '../utils/productSearch'
 
 const Collection = () => {
 
-  const { products, search, showSearch, voiceSort, setVoiceSort, voiceCategory, setVoiceCategory,  voiceSearchFilters, setVoiceSearchFilters } = useContext(ShopContext)
+  const { products, search, showSearch, voiceSort, setVoiceSort, voiceCategory, setVoiceCategory,  voiceSearchFilters, setVoiceSearchFilters, voiceProductIds } = useContext(ShopContext)
 
   const [showFilter,setShowFilter] = useState(false)
   const [filterProducts,setFilterProducts] = useState([])
@@ -50,7 +50,13 @@ const Collection = () => {
     (aiFilters.maxPrice !== null && aiFilters.maxPrice !== undefined && aiFilters.maxPrice !== "")
   );
 
-  if (hasAiFilter) {
+  if (voiceProductIds && voiceProductIds.length > 0) {
+    // The assistant already announced an exact set of products (search or
+    // recommendation) - show precisely that, in that order, rather than
+    // re-deriving an approximation.
+    const byId = new Map(products.map((item) => [item._id, item]));
+    productsCopy = voiceProductIds.map((id) => byId.get(id)).filter(Boolean);
+  } else if (hasAiFilter) {
     // Best-effort keyword match (utils/productSearch): scores products by
     // how many requested keywords they match instead of requiring every
     // one to match, so a facet the catalog has no data for (e.g. color)
@@ -162,6 +168,7 @@ const Collection = () => {
   showSearch,
   products,
   voiceSearchFilters,
+  voiceProductIds,
 ]);
 
 

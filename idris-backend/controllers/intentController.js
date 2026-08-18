@@ -1,12 +1,14 @@
 import { GoogleGenAI } from "@google/genai";
 import { assistantTools } from "../utils/assistantTools.js";
 import { assistantToolSanitizers } from "../utils/assistantToolSanitizers.js";
+import { sanitizeUIContext } from "../utils/uiContext.js";
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
 });
 
 const ALLOWED_TOOL_NAMES = new Set(assistantTools.map((tool) => tool.name));
+const NO_REPLY_SENTINEL = "NONE";
 
 const extractFunctionCall = (response) => {
   if (response.functionCalls?.length) {
@@ -18,9 +20,17 @@ const extractFunctionCall = (response) => {
   return part?.functionCall || null;
 };
 
+const extractReplyText = (response) => {
+  const direct = response.text?.trim();
+  if (direct) return direct;
+
+  const parts = response.candidates?.[0]?.content?.parts || [];
+  return parts.map((part) => part.text || "").join("").trim();
+};
+
 export const detectAIIntent = async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, uiContext } = req.body;
 
     if (!message || typeof message !== "string") {
       return res.status(400).json({
@@ -28,6 +38,14 @@ export const detectAIIntent = async (req, res) => {
         message: "Message is required",
       });
     }
+
+    const safeUIContext = sanitizeUIContext(uiContext) || {
+      page: "other",
+      visibleProducts: [],
+      selectedProduct: null,
+      activeSearch: "",
+      uiOpen: {},
+    };
 
     const response = await ai.models.generateContent({
       model: "gemini-3.6-flash",
@@ -37,9 +55,20 @@ You are the action router for the IDRIS ecommerce website.
 Call exactly one of the available tools if the customer's message clearly
 asks for browsing, searching, recommendations, sorting, or navigation.
 
-If the message is general conversation, a question, or does not match any
-tool (e.g. small talk, store policy questions, order/account questions),
-do NOT call a tool - just respond with a short plain-text acknowledgement.
+Current UI context (what the customer is actually looking at right now -
+use it to resolve references like "this", "that one", "the second one",
+"this product" to a specific id in visibleProducts/selectedProduct):
+${JSON.stringify(safeUIContext)}
+
+If the customer's message references a specific item ambiguously (e.g.
+"open this", "add the second one") and you cannot confidently tell which
+item they mean from the UI context above, do NOT call a tool - instead
+reply with one short clarifying question that names the visible options.
+
+For any other message that doesn't match a tool and isn't an ambiguous
+item reference (general questions, greetings, store policy, small talk),
+do NOT call a tool and do NOT try to answer it yourself - reply with
+exactly the single word ${NO_REPLY_SENTINEL} and nothing else.
 
 Never invent a tool or arguments that are not declared. Never attempt to
 delete, update, add, or otherwise modify any data - no such tool exists.
@@ -55,21 +84,26 @@ ${message}
 
     const call = extractFunctionCall(response);
 
-    if (!call || !ALLOWED_TOOL_NAMES.has(call.name)) {
-      return res.json({ success: true, tool: null });
+    if (call && ALLOWED_TOOL_NAMES.has(call.name)) {
+      const sanitize = assistantToolSanitizers[call.name];
+      const sanitizedArgs = sanitize(call.args || {});
+
+      if (sanitizedArgs) {
+        return res.json({
+          success: true,
+          tool: call.name,
+          arguments: sanitizedArgs,
+        });
+      }
     }
 
-    const sanitize = assistantToolSanitizers[call.name];
-    const sanitizedArgs = sanitize(call.args || {});
-
-    if (!sanitizedArgs) {
-      return res.json({ success: true, tool: null });
-    }
+    const replyText = extractReplyText(response);
+    const isClarification = replyText && replyText.toUpperCase() !== NO_REPLY_SENTINEL;
 
     return res.json({
       success: true,
-      tool: call.name,
-      arguments: sanitizedArgs,
+      tool: null,
+      reply: isClarification ? replyText.slice(0, 300) : null,
     });
   } catch (error) {
     console.error("AI intent detection error:", error);
