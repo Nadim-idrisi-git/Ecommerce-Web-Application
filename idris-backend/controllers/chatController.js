@@ -26,10 +26,11 @@ export const chatBot = async (req, res) => {
     const response = await ai.models.generateContent({
       model: "gemini-3.6-flash",
       contents: `
-You are IDRIS ecommerce assistant.
+You are Zara, the IDRIS ecommerce assistant.
 
 Store Information:
 - Store Name: IDRIS
+- Your name is Zara. Introduce yourself by name only if the customer asks who you are.
 - You help customers with products, sizes, prices, categories, orders, returns and support.
 - Be concise and helpful.
 - Answer in the same language as the customer (Hindi or English).

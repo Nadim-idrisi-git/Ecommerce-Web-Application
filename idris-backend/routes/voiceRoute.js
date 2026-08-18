@@ -1,10 +1,11 @@
 import express from "express";
 import multer from "multer";
-import { transcribeAudio } from "../controllers/voiceController.js";
+import { transcribeAudio, streamSpeech } from "../controllers/voiceController.js";
 import createRateLimiter from "../middleware/rateLimit.js";
 
 const voiceRouter = express.Router();
 const voiceRateLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 12 });
+const speakRateLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 20 });
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -26,5 +27,7 @@ voiceRouter.post(
   upload.single("audio"),
   transcribeAudio
 );
+
+voiceRouter.post("/speak", speakRateLimiter, streamSpeech);
 
 export default voiceRouter;

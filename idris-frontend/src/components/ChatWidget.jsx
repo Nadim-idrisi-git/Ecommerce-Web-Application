@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useContext } from "react";
 import axios from "axios";
 import { ShopContext } from "../context/ShopContext";
 
-const BOT_NAME = "IDRIS. Assistant";
+const BOT_NAME = "Zara";
 const QUICK_REPLIES = [
   { label: "New Arrivals", value: "Show me the latest arrivals" },
   { label: "Track Order", value: "Track my order" },
@@ -129,7 +129,7 @@ function ChatWindow({ onClose }) {
     {
       id: 1,
       role: "bot",
-      text: `Welcome to IDRIS. 🖤 I'm your personal style assistant. How can I help you today?`,
+      text: `Welcome to IDRIS. 🖤 I'm Zara, your personal style assistant. How can I help you today?`,
     },
   ]);
   const [input, setInput] = useState("");
@@ -242,7 +242,7 @@ function ChatWindow({ onClose }) {
               fontFamily: "Georgia,serif",
             }}
           >
-            I.
+            Z.
           </span>
         </div>
         <div style={{ flex: 1 }}>
@@ -255,7 +255,7 @@ function ChatWindow({ onClose }) {
               fontFamily: "Georgia, serif",
             }}
           >
-            IDRIS.
+            Zara
           </div>
           <div
             style={{
