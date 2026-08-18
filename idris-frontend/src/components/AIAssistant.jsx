@@ -1,4 +1,4 @@
-import { useContext, useEffect, useRef, useState } from "react";
+import { use, useContext, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getApiConfig } from "../config/api";
 import { ShopContext } from "../context/ShopContext";
@@ -7,28 +7,51 @@ export default function AIAssistant() {
   const navigate = useNavigate();
   const {
     products,
+    search,
     setSearch,
+    showSearch,
     setShowSearch,
+    voiceSort,
     setVoiceSort,
+    voiceCategory,
     setVoiceCategory,
+    voiceSearchFilters,
+    setVoiceSearchFilters,
+    token,
+    user,
   } = useContext(ShopContext);
-  const [open, setOpen] = useState(false);
-  const [status, setStatus] = useState("idle");
 
-  const [transcript, setTranscript] = useState("");
-  const [aiReply, setAiReply] = useState("");
-  const [intent, setIntent] = useState(null);
+  // `user` is already resolved server-side (JWT-verified /api/user/profile) -
+  // only the first name is ever used here, never the full profile object.
+  const firstName = user?.name?.trim().split(/\s+/)[0] || "";
+  const greetingLine = firstName
+    ? `Hi ${firstName}, how can I assist you?`
+    : "How can I assist you?";
+  const [open, setOpen] = useState(false);
+  const [status, setStatus] = useState(() => {
+    const hasMediaDevices =
+      navigator.mediaDevices &&
+      typeof navigator.mediaDevices.getUserMedia === "function";
+
+    const hasMediaRecorder = typeof window.MediaRecorder !== "undefined";
+
+    return hasMediaDevices && hasMediaRecorder ? "idle" : "unsupported";
+  });
+
+  const [, setTranscript] = useState("");
+  const [, setAiReply] = useState("");
+  const [, setIntent] = useState(null);
   const [currentAction, setCurrentAction] = useState("");
-  const [searchFilters, setSearchFilters] = useState(null);
-  const [searchResults, setSearchResults] = useState([]);
-  const [recommendationQuery, setRecommendationQuery] = useState("");
-  const [recommendations, setRecommendations] = useState([]);
+  const [, /*searchFilters*/ setSearchFilters] = useState(null);
+  const [, setSearchResults] = useState([]);
+  const [, setRecommendationQuery] = useState("");
+  const [, setRecommendations] = useState([]);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [conversationHistory, setConversationHistory] = useState([]);
+  const [, setConversationHistory] = useState([]);
   const [securityNotice, setSecurityNotice] = useState("");
   const [voiceError, setVoiceError] = useState("");
 
-  const [supported, setSupported] = useState(true);
+  //const [, setSupported] = useState(true);
 
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
@@ -50,40 +73,57 @@ export default function AIAssistant() {
     lastProducts: [],
   });
 
-  const allowedActions = {
-    OPEN_HOME: true,
-    OPEN_ABOUT: true,
-    OPEN_CONTACT: true,
-    OPEN_CART: true,
-    OPEN_COLLECTION: true,
-    OPEN_PROFILE: true,
-    LOGIN: true,
-    TRACK_ORDER: true,
-    SHOW_OFFERS: true,
-    SEARCH_PRODUCT: true,
-    RECOMMEND_PRODUCT: true,
-    SORT_PRODUCTS: true,
-  };
+  const allowedActions = new Set([
+    "OPEN_HOME",
+    "OPEN_ABOUT",
+    "OPEN_CONTACT",
+    "OPEN_CART",
+    "OPEN_COLLECTION",
+    "OPEN_PROFILE",
+    "OPEN_ADDRESSES",
+    "OPEN_ORDERS",
+    "TRACK_ORDER",
+    "SHOW_OFFERS",
+    "LOGIN",
+    "SEARCH_PRODUCT",
+    "RECOMMEND_PRODUCT",
+    "SORT_PRODUCTS",
+    "OPEN_ORDERS",
+  ]);
 
   const isBraveBrowser = () =>
     Boolean(window.navigator.brave) ||
     /Brave/i.test(window.navigator.userAgent || "");
 
   useEffect(() => {
-    const hasMediaDevices =
-      navigator.mediaDevices &&
-      typeof navigator.mediaDevices.getUserMedia === "function";
-
-    const hasMediaRecorder = typeof window.MediaRecorder !== "undefined";
-
-    if (!hasMediaDevices || !hasMediaRecorder) {
-      setSupported(false);
-      setStatus("unsupported");
-    }
-
     return () => {
-      stopRecording();
-      stopSpeaking();
+      listeningSessionRef.current = false;
+      hadSpeechRef.current = false;
+
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+        } catch {
+          // Ignore cleanup races.
+        }
+      }
+
+      const recorder = mediaRecorderRef.current;
+
+      if (recorder && recorder.state !== "inactive") {
+        recorder.stop();
+      }
+
+      mediaRecorderRef.current = null;
+
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+        mediaStreamRef.current = null;
+      }
+
+      if (speechSynthesisRef.current) {
+        speechSynthesisRef.current.cancel();
+      }
     };
   }, []);
 
@@ -98,7 +138,10 @@ export default function AIAssistant() {
     window.speechSynthesis?.addEventListener?.("voiceschanged", syncVoices);
 
     return () => {
-      window.speechSynthesis?.removeEventListener?.("voiceschanged", syncVoices);
+      window.speechSynthesis?.removeEventListener?.(
+        "voiceschanged",
+        syncVoices,
+      );
     };
   }, []);
 
@@ -109,13 +152,15 @@ export default function AIAssistant() {
 
     const preferredNames = [
       "Google UK English Female",
-      "Google UK English Male",
+      // "Google UK English Male",
       "Google US English",
       "Microsoft Aria Online (Natural) - English (United States)",
       "Microsoft Zira Online (Natural) - English (United States)",
+      "Hindi (India) - Microsoft Heera Online (Natural)",
       "Samantha",
-      "Daniel",
-      "Karen",
+      "Victoria",
+      // "Daniel",
+      // "Karen",
     ];
 
     const voice = preferredNames
@@ -127,8 +172,12 @@ export default function AIAssistant() {
     const englishVoice = voices.find((item) =>
       /en(-|_)?(IN|US|GB)?/i.test(item.lang || ""),
     );
+    //Add hindi voice support
+    const hindiVoice = voices.find((item) =>
+      /hn(-|_)?(IN)?/i.test(item.lang || ""),
+    );
 
-    return englishVoice || voices[0] || null;
+    return englishVoice || hindiVoice || voices[0] || null;
   };
 
   const getAudioExtension = (mimeType) => {
@@ -150,7 +199,11 @@ export default function AIAssistant() {
   };
 
   const speakText = (text) => {
-    if (!text || !window.speechSynthesis || typeof SpeechSynthesisUtterance === "undefined") {
+    if (
+      !text ||
+      !window.speechSynthesis ||
+      typeof SpeechSynthesisUtterance === "undefined"
+    ) {
       return;
     }
 
@@ -202,21 +255,36 @@ export default function AIAssistant() {
     const memory = memoryRef.current;
 
     const hasFollowUpColor =
-      ["black ones", "white ones", "blue ones", "red ones", "green ones", "pink ones", "brown ones"].some((phrase) =>
-        normalized.includes(phrase),
-      ) || /^(black|white|blue|red|green|pink|brown)\s+ones?$/.test(normalized);
+      [
+        "black ones",
+        "white ones",
+        "blue ones",
+        "red ones",
+        "green ones",
+        "pink ones",
+        "brown ones",
+      ].some((phrase) => normalized.includes(phrase)) ||
+      /^(black|white|blue|red|green|pink|brown)\s+ones?$/.test(normalized);
 
-    const hasFollowUpCategory =
-      ["those", "same ones", "more like that", "similar ones", "more products", "more like this"].some((phrase) =>
-        normalized.includes(phrase),
-      );
+    const hasFollowUpCategory = [
+      "those",
+      "same ones",
+      "more like that",
+      "similar ones",
+      "more products",
+      "more like this",
+    ].some((phrase) => normalized.includes(phrase));
 
     if (hasFollowUpColor || hasFollowUpCategory) {
       return {
         query: text.trim(),
         category: memory.lastCategory || "",
         color:
-          (normalized.match(/^(black|white|blue|red|green|pink|brown|yellow|grey|gray|beige|navy|maroon|olive)/)?.[1] || memory.lastColor || ""),
+          normalized.match(
+            /^(black|white|blue|red|green|pink|brown|yellow|grey|gray|beige|navy|maroon|olive)/,
+          )?.[1] ||
+          memory.lastColor ||
+          "",
         maxPrice: "",
       };
     }
@@ -237,7 +305,8 @@ export default function AIAssistant() {
   const rememberRecommendationContext = (query, picks) => {
     memoryRef.current = {
       ...memoryRef.current,
-      lastRecommendationQuery: query || memoryRef.current.lastRecommendationQuery || "",
+      lastRecommendationQuery:
+        query || memoryRef.current.lastRecommendationQuery || "",
       lastProducts: picks || memoryRef.current.lastProducts || [],
     };
   };
@@ -248,19 +317,67 @@ export default function AIAssistant() {
     const matchers = [
       {
         type: "OPEN_HOME",
-        values: ["open home", "go home", "home page", "go to home", "go to homepage", "homepage"],
+        values: [
+          "open home",
+          "go home",
+          "home page",
+          "go to home",
+          "go to homepage",
+          "homepage",
+          "go to the homepage",
+        ],
       },
       {
         type: "OPEN_ABOUT",
-        values: ["open about", "about page", "go to about", "about us"],
+        values: [
+          "open about",
+          "about page",
+          "go to about",
+          "about us",
+          "open about page",
+          "go to about page",
+        ],
       },
       {
         type: "OPEN_CONTACT",
-        values: ["open contact", "contact page", "go to contact", "contact us", "support page"],
+        values: [
+          "open contact",
+          "contact page",
+          "go to contact",
+          "contact us",
+          "support page",
+        ],
       },
       {
         type: "OPEN_CART",
         values: ["open cart", "show cart", "go to cart", "cart"],
+      },
+      {
+        type: "ADD_TO_THE_CART",
+        values: [
+          "add to cart",
+          "put in cart",
+          "add item to cart",
+          "put product in cart",
+          "add this to cart",
+          "add this product to cart",
+        ],
+      },
+      {
+        type: "SHOP_NOW",
+        values: ["shop now", "browse products", "show products"],
+      },
+      {
+        type: "SHOW_ADDRESSES",
+        values: [
+          "show addresses",
+          "my addresses",
+          "address book",
+          "manage addresses",
+          "view addresses",
+          "show my addresse",
+          "open addresses",
+        ],
       },
       {
         type: "OPEN_COLLECTION",
@@ -275,11 +392,22 @@ export default function AIAssistant() {
       },
       {
         type: "OPEN_PROFILE",
-        values: ["open profile", "my profile", "profile page", "go to profile", "open my profile"],
+        values: [
+          "open profile",
+          "my profile",
+          "profile page",
+          "go to profile",
+          "open my profile",
+        ],
       },
       {
         type: "TRACK_ORDER",
-        values: ["track order", "where is my order", "order status", "track my order"],
+        values: [
+          "track order",
+          "where is my order",
+          "order status",
+          "track my order",
+        ],
       },
       {
         type: "SHOW_OFFERS",
@@ -287,7 +415,14 @@ export default function AIAssistant() {
       },
       {
         type: "LOGIN",
-        values: ["login", "log in", "sign in", "signin"],
+        values: [
+          "login",
+          "log in",
+          "sign in",
+          "signin",
+          "sign in to my account",
+          "log into my account",
+        ],
       },
       {
         type: "SEARCH_PRODUCT",
@@ -298,23 +433,49 @@ export default function AIAssistant() {
           "i want",
           "i need",
           "looking for",
+          "suggest products",
+          "recommend products",
+          "show me products",
+          "show me items",
+          "find items",
+          "search for items",
+          "i want items",
+          "i need items",
+          "looking for items",
         ],
       },
       {
         type: "DELETE_PRODUCT",
-        values: ["delete product", "remove product", "erase product", "wipe product"],
+        values: [
+          "delete product",
+          "remove product",
+          "erase product",
+          "wipe product",
+        ],
       },
       {
         type: "UPDATE_PRODUCT",
-        values: ["update product", "edit product", "modify product", "change product"],
+        values: [
+          "update product",
+          "edit product",
+          "modify product",
+          "change product",
+        ],
       },
       {
         type: "DATABASE_MODIFY",
-        values: ["database", "collection schema", "change database", "db update"],
+        values: [
+          "database",
+          "collection schema",
+          "change database",
+          "db update",
+        ],
       },
       {
         type: "SORT_PRODUCTS",
         values: [
+          "sort products by price low to high",
+          "sort products by price high to low",
           "sort products",
           "sort by price",
           "price wise",
@@ -342,7 +503,10 @@ export default function AIAssistant() {
     const searchValue =
       matched.type === "SEARCH_PRODUCT"
         ? normalized
-            .replace(/^(show me|find|search for|i want|i need|looking for)\s*/i, "")
+            .replace(
+              /^(show me|find|search for|i want|i need|looking for)\s*/i,
+              "",
+            )
             .trim()
         : normalized;
 
@@ -367,7 +531,10 @@ export default function AIAssistant() {
       { value: "sweater", terms: ["sweater", "sweaters"] },
       { value: "shirt", terms: ["shirt", "shirts", "topwear"] },
       { value: "t-shirt", terms: ["t-shirt", "tee", "tees"] },
-      { value: "pant", terms: ["pant", "pants", "trouser", "trousers", "bottomwear"] },
+      {
+        value: "pant",
+        terms: ["pant", "pants", "trouser", "trousers", "bottomwear"],
+      },
       { value: "dress", terms: ["dress", "dresses"] },
       { value: "saree", terms: ["saree", "sarees"] },
       { value: "kids", terms: ["kids", "kid"] },
@@ -403,7 +570,9 @@ export default function AIAssistant() {
       filters.color = colorHit;
     }
 
-    const priceMatch = normalized.match(/(?:under|below|less than|within)\s*(?:rs\.?|₹|rupees)?\s*(\d+(?:,\d{3})*(?:\.\d+)?)/i);
+    const priceMatch = normalized.match(
+      /(?:under|below|less than|within)\s*(?:rs\.?|₹|rupees)?\s*(\d+(?:,\d{3})*(?:\.\d+)?)/i,
+    );
     if (priceMatch) {
       filters.maxPrice = Number(priceMatch[1].replace(/,/g, ""));
     }
@@ -416,12 +585,27 @@ export default function AIAssistant() {
     const keywords = [];
 
     const groups = [
-      { keyword: "winter", terms: ["winter", "cold", "warm", "warm clothes", "winter clothes"] },
-      { keyword: "office", terms: ["office", "work", "formal", "professional", "business"] },
-      { keyword: "party", terms: ["party", "event", "occasion", "wedding", "festive"] },
+      {
+        keyword: "winter",
+        terms: ["winter", "cold", "warm", "warm clothes", "winter clothes"],
+      },
+      {
+        keyword: "office",
+        terms: ["office", "work", "formal", "professional", "business"],
+      },
+      {
+        keyword: "party",
+        terms: ["party", "event", "occasion", "wedding", "festive"],
+      },
       { keyword: "casual", terms: ["casual", "daily", "everyday", "regular"] },
-      { keyword: "travel", terms: ["travel", "trip", "vacation", "holiday", "journey"] },
-      { keyword: "sport", terms: ["sport", "gym", "fitness", "running", "training"] },
+      {
+        keyword: "travel",
+        terms: ["travel", "trip", "vacation", "holiday", "journey"],
+      },
+      {
+        keyword: "sport",
+        terms: ["sport", "gym", "fitness", "running", "training"],
+      },
       { keyword: "comfort", terms: ["comfortable", "comfort", "soft", "easy"] },
     ];
 
@@ -454,23 +638,38 @@ export default function AIAssistant() {
         if (haystack.includes(keyword)) score += 3;
       });
 
-      if (keywords.includes("winter") && /jacket|hoodie|sweater|coat|shawl/.test(haystack)) {
+      if (
+        keywords.includes("winter") &&
+        /jacket|hoodie|sweater|coat|shawl/.test(haystack)
+      ) {
         score += 5;
       }
 
-      if (keywords.includes("office") && /shirt|trouser|pant|blazer|formal/.test(haystack)) {
+      if (
+        keywords.includes("office") &&
+        /shirt|trouser|pant|blazer|formal/.test(haystack)
+      ) {
         score += 5;
       }
 
-      if (keywords.includes("party") && /dress|topwear|shirt|fashion|stylish/.test(haystack)) {
+      if (
+        keywords.includes("party") &&
+        /dress|topwear|shirt|fashion|stylish/.test(haystack)
+      ) {
         score += 4;
       }
 
-      if (keywords.includes("travel") && /jacket|hoodie|shirt|pant|casual/.test(haystack)) {
+      if (
+        keywords.includes("travel") &&
+        /jacket|hoodie|shirt|pant|casual/.test(haystack)
+      ) {
         score += 3;
       }
 
-      if (keywords.includes("sport") && /t-shirt|tee|shirt|track|short|jogger/.test(haystack)) {
+      if (
+        keywords.includes("sport") &&
+        /t-shirt|tee|shirt|track|short|jogger/.test(haystack)
+      ) {
         score += 4;
       }
 
@@ -500,6 +699,8 @@ export default function AIAssistant() {
       "i need",
       "show me something",
       "outfit",
+      "suggest me some clothes",
+      "suggest me best products",
     ].some((phrase) => normalized.includes(phrase));
   };
 
@@ -509,30 +710,56 @@ export default function AIAssistant() {
     const normalized = text.toLowerCase().trim();
 
     if (
-      ["low to high", "low-high", "cheapest", "price ascending", "sort by price low to high"].some((phrase) =>
-        normalized.includes(phrase),
-      )
+      [
+        "low to high",
+        "low-high",
+        "sort by price",
+        "cheapest",
+        "price ascending",
+        "sort by price low to high",
+      ].some((phrase) => normalized.includes(phrase))
     ) {
       return { type: "SORT_PRODUCTS", value: "low-high" };
     }
 
     if (
-      ["high to low", "high-low", "expensive", "price descending", "sort by price high to low"].some((phrase) =>
-        normalized.includes(phrase),
-      )
+      [
+        "high to low",
+        "high-low",
+        "expensive",
+        "price descending",
+        "sort by price high to low",
+        "sort products by price high to low",
+        "sort products by descending price",
+      ].some((phrase) => normalized.includes(phrase))
     ) {
       return { type: "SORT_PRODUCTS", value: "high-low" };
     }
 
-    if (["latest", "newest", "recent", "new arrivals", "sort by latest"].some((phrase) =>
-      normalized.includes(phrase),
-    )) {
+    if (
+      [
+        "latest",
+        "newest",
+        "recent",
+        "new arrivals",
+        "sort by latest",
+        "show me latest products",
+        "latest products",
+        "sort by newest",
+      ].some((phrase) => normalized.includes(phrase))
+    ) {
       return { type: "SORT_PRODUCTS", value: "newest" };
     }
 
-    if (["category wise", "sort by category", "category", "by category"].some((phrase) =>
-      normalized.includes(phrase),
-    )) {
+    if (
+      [
+        "category wise",
+        "sort by category",
+        "category",
+        "by category",
+        "sort by category wise",
+      ].some((phrase) => normalized.includes(phrase))
+    ) {
       return { type: "SORT_PRODUCTS", value: "category" };
     }
 
@@ -565,7 +792,7 @@ export default function AIAssistant() {
 
     recorder.onstart = () => {
       setStatus("listening");
-      speakText("How can I assist you?");
+      speakText(greetingLine);
     };
 
     recorder.ondataavailable = (event) => {
@@ -592,7 +819,11 @@ export default function AIAssistant() {
 
         const formData = new FormData();
 
-        formData.append("audio", audioBlob, `idris.${getAudioExtension(audioBlob.type)}`);
+        formData.append(
+          "audio",
+          audioBlob,
+          `idris.${getAudioExtension(audioBlob.type)}`,
+        );
 
         const { backendUrl, apiConfigError } = getApiConfig();
 
@@ -615,9 +846,9 @@ export default function AIAssistant() {
         if (!assistantResponse) {
           assistantResponse = "";
         }
-      } catch (error) {
+      } catch /*(error)*/ {
         setVoiceError(
-          "We could not understand the audio or connect to voice services. You can try again.",
+          "I could not understand the audio or connect to voice services. You can try again.",
         );
         setStatus("error");
       }
@@ -626,66 +857,138 @@ export default function AIAssistant() {
     recorder.start(250);
   };
 
+  const buildFiltersFromAIIntent = (detectedIntent, originalText) => {
+    const parameters = detectedIntent?.parameters || {};
+
+    const fallbackFilters = extractSearchFilters(originalText);
+
+    return {
+      query: parameters.query || fallbackFilters.query || originalText.trim(),
+
+      category: parameters.category || fallbackFilters.category || "",
+
+      color: parameters.color || fallbackFilters.color || "",
+
+      maxPrice: parameters.maxPrice ?? fallbackFilters.maxPrice ?? "",
+    };
+  };
+
   const processVoiceText = async (text) => {
     const normalizedText = text.trim();
+
     if (!normalizedText) return;
 
     setTranscript(normalizedText);
     pushHistory("user", normalizedText);
 
     const memoryFilters = deriveMemoryContext(normalizedText);
-    const detectedIntent = detectIntent(normalizedText);
-    const sortCommandResponse = handleSortCommand(normalizedText);
 
-    if (sortCommandResponse) {
-      setIntent({ type: "SORT_PRODUCTS", value: normalizedText });
-      pushHistory("assistant", sortCommandResponse);
-      return sortCommandResponse;
+    // First try AI intent detection
+    const aiIntentResponse = await getAIIntent(normalizedText);
+    if (aiIntentResponse?.intent === "SEARCH_PRODUCT") {
+      setVoiceSearchFilters({
+        query: aiIntentResponse.parameters?.query || "",
+        category: aiIntentResponse.parameters?.category || "",
+        color: aiIntentResponse.parameters?.color || "",
+        maxPrice: aiIntentResponse.parameters?.maxPrice ?? null,
+      });
+    }
+
+    let detectedIntent = null;
+
+    if (aiIntentResponse) {
+      detectedIntent = convertAIIntentToLocalIntent(
+        validateAIIntent(aiIntentResponse),
+      );
+    }
+
+    // Fallback to existing rule-based intent detection
+    if (!detectedIntent) {
+      detectedIntent = detectIntent(normalizedText);
     }
 
     setIntent(detectedIntent);
+
+    // Existing local sort detection remains as a fallback
+    const sortCommandResponse = handleSortCommand(normalizedText);
+
+    if (
+      sortCommandResponse &&
+      (!detectedIntent || detectedIntent.type === "UNKNOWN")
+    ) {
+      setIntent({
+        type: "SORT_PRODUCTS",
+        value: normalizedText,
+      });
+
+      pushHistory("assistant", sortCommandResponse);
+
+      return sortCommandResponse;
+    }
+
     executeIntentAction(detectedIntent);
+
     const filters =
-      detectedIntent.type === "SEARCH_PRODUCT"
-        ? extractSearchFilters(normalizedText)
+      detectedIntent?.type === "SEARCH_PRODUCT"
+        ? buildFiltersFromAIIntent(detectedIntent, normalizedText)
         : memoryFilters || null;
+
     setSearchFilters(filters);
+
     const matchingProducts = filters ? filterProducts(filters) : [];
+
     setSearchResults(matchingProducts);
 
     let assistantResponse = "";
 
     if (
-      detectedIntent.type === "DELETE_PRODUCT" ||
-      detectedIntent.type === "UPDATE_PRODUCT" ||
-      detectedIntent.type === "DATABASE_MODIFY"
+      detectedIntent?.type === "DELETE_PRODUCT" ||
+      detectedIntent?.type === "UPDATE_PRODUCT" ||
+      detectedIntent?.type === "DATABASE_MODIFY"
     ) {
       assistantResponse =
-        "I cannot do that action. I can only help with browsing, search, and navigation.";
-    } else if (filters) {
+        "I cannot perform that action. I can only help with browsing, search, recommendations, and navigation.";
+
+      setSecurityNotice(
+        "Blocked unsafe action: database modification is not available to the AI Assistant.",
+      );
+
+      speakText(assistantResponse);
+    } else if (detectedIntent?.type === "SEARCH_PRODUCT") {
       assistantResponse =
         matchingProducts.length > 0
-          ? `I found ${matchingProducts.length} matching products.`
+          ? `${firstName ? `Sure, ${firstName}. ` : ""}I found ${matchingProducts.length} matching products.`
           : "I could not find an exact match, so I opened the collection.";
 
       setSearch(filters.query);
       setShowSearch(true);
+
       navigate("/collection");
+
       setCurrentAction(
         matchingProducts.length > 0
           ? `Showing ${matchingProducts.length} matching products`
           : "No exact match found, showing collection",
       );
+
       setAiReply(assistantResponse);
+
       rememberSearchContext(filters, matchingProducts, filters.query);
+
       speakText(assistantResponse);
-    } else if (detectRecommendationIntent(normalizedText)) {
-      assistantResponse = handleRecommendationQuery(normalizedText);
+    } else if (detectedIntent?.type === "RECOMMEND_PRODUCT") {
+      assistantResponse = handleRecommendationQuery(
+        detectedIntent.parameters?.query || normalizedText,
+      );
     } else {
       assistantResponse = await sendTranscriptToAI(normalizedText);
     }
 
-    pushHistory("assistant", assistantResponse || currentAction || "Processed command");
+    pushHistory(
+      "assistant",
+      assistantResponse || currentAction || "Processed command",
+    );
+
     return assistantResponse;
   };
 
@@ -760,13 +1063,17 @@ export default function AIAssistant() {
         recognitionRef.current = null;
         voiceModeRef.current = "media";
         startMediaRecorderSession().catch(() => {
-          setVoiceError("Voice recognition is temporarily unavailable. Please try again.");
+          setVoiceError(
+            "Voice recognition is temporarily unavailable. Please try again.",
+          );
           setStatus("error");
         });
         return;
       }
 
-      setVoiceError("Voice recognition is temporarily unavailable. Please try again.");
+      setVoiceError(
+        "Voice recognition is temporarily unavailable. Please try again.",
+      );
       setStatus("error");
     };
 
@@ -803,8 +1110,15 @@ export default function AIAssistant() {
         description.includes(query) ||
         category.includes(query);
 
-      const categoryMatch = !filters.category || category.includes(filters.category) || subCategory.includes(filters.category);
-      const colorMatch = !filters.color || color.includes(filters.color) || name.includes(filters.color) || description.includes(filters.color);
+      const categoryMatch =
+        !filters.category ||
+        category.includes(filters.category) ||
+        subCategory.includes(filters.category);
+      const colorMatch =
+        !filters.color ||
+        color.includes(filters.color) ||
+        name.includes(filters.color) ||
+        description.includes(filters.color);
       const priceMatch = !filters.maxPrice || price <= filters.maxPrice;
 
       return queryMatch && categoryMatch && colorMatch && priceMatch;
@@ -812,9 +1126,9 @@ export default function AIAssistant() {
   };
 
   const executeIntentAction = (detectedIntent) => {
-    if (!detectedIntent?.type) return;
+    if (!detectedIntent?.type) return null;
 
-    if (!allowedActions[detectedIntent.type]) {
+    /*if (!allowedActions[detectedIntent.type]) {
       const blockedMessage =
         "I cannot do that action. I can only help with browsing, search, and navigation.";
 
@@ -826,15 +1140,36 @@ export default function AIAssistant() {
       speakText(blockedMessage);
       setStatus("error");
       return;
-    }
+    }*/
 
     setSecurityNotice("");
 
     switch (detectedIntent.type) {
+      case "ADD_TO_THE_CART":
+        setCurrentAction("Adding to cart");
+        setAiReply("I cannot add items to the cart. Please do it manually.");
+        speakText("I cannot add items to the cart. Please do it manually.");
+        return;
+
+      case "SHOP_NOW":
+        setCurrentAction("Opening collection");
+        navigate("/collection");
+        setAiReply("Showing the collection.");
+        speakText("Showing the collection.");
+        return;
+
+      case "OPEN_ADDRESSES":
+      case "SHOW_ADDRESSES":
+        setCurrentAction("Opening addresses");
+        navigate("/addresses");
+        setAiReply("Opening your saved addresses.");
+        speakText("Opening your saved addresses.");
+        return;
+
       case "OPEN_HOME":
         setCurrentAction("Opening home");
         navigate("/");
-        setAiReply("Opening home.");
+        setAiReply("sure Opening home.");
         speakText("Opening home.");
         return;
 
@@ -881,9 +1216,9 @@ export default function AIAssistant() {
         return;
 
       case "TRACK_ORDER":
-        setCurrentAction("Track order needs order ID");
-        setAiReply("Please open the order tracking page and enter your order ID.");
-        speakText("Please open the order tracking page and enter your order ID.");
+        setCurrentAction("");
+        setAiReply("");
+        speakText("");
         return;
 
       case "SHOW_OFFERS":
@@ -893,10 +1228,17 @@ export default function AIAssistant() {
         speakText("I am showing available offers in the collection.");
         return;
 
-      case "SEARCH_PRODUCT":
+      case "SEARCH_PRODUCT": {
+        const filters = buildFiltersFromAIIntent(
+          detectedIntent,
+          detectedIntent.value,
+        );
+
         setCurrentAction("Search intent detected");
-        setSearchFilters(extractSearchFilters(detectedIntent.value));
+        setSearchFilters(filters);
+
         return;
+      }
 
       case "RECOMMEND_PRODUCT":
         setCurrentAction("Recommendation intent detected");
@@ -904,6 +1246,13 @@ export default function AIAssistant() {
 
       case "SORT_PRODUCTS":
         setCurrentAction("Sort intent detected");
+        return;
+
+      case "OPEN_ORDERS":
+        setCurrentAction("Opening orders");
+        navigate("/orders");
+        setAiReply("Opening your orders.");
+        speakText("Opening your orders.");
         return;
 
       default:
@@ -916,7 +1265,7 @@ export default function AIAssistant() {
     const picks = scoreRecommendations(keywords);
     const responseText =
       picks.length > 0
-        ? `I recommend ${picks.map((item) => item.name).join(", ")}.`
+        ? `${firstName ? `Sure, ${firstName}. ` : ""}I recommend ${picks.map((item) => item.name).join(", ")}.`
         : "I could not find a strong recommendation, so I opened the catalog.";
 
     setRecommendationQuery(text.trim());
@@ -961,7 +1310,8 @@ export default function AIAssistant() {
         setVoiceCategory(
           ["men", "women", "kids"].includes(categoryKeyword)
             ? categoryKeyword.charAt(0).toUpperCase() + categoryKeyword.slice(1)
-            : categoryKeyword.charAt(0).toUpperCase() + categoryKeyword.slice(1),
+            : categoryKeyword.charAt(0).toUpperCase() +
+                categoryKeyword.slice(1),
         );
       }
 
@@ -979,12 +1329,68 @@ export default function AIAssistant() {
       sortIntent.value === "low-high"
         ? "Sorting products from low to high price."
         : sortIntent.value === "high-low"
-        ? "Sorting products from high to low price."
-        : "Showing the latest products.";
+          ? "Sorting products from high to low price."
+          : "Showing the latest products.";
 
     setAiReply(spoken);
     speakText(spoken);
     return spoken;
+  };
+
+  const validateAIIntent = (aiIntent) => {
+    if (!aiIntent?.intent) {
+      return null;
+    }
+
+    if (!allowedActions.has(aiIntent.intent)) {
+      setSecurityNotice("This action is not allowed by the AI Assistant.");
+
+      setCurrentAction("Blocked unsafe action");
+
+      return null;
+    }
+
+    return aiIntent;
+  };
+
+  const convertAIIntentToLocalIntent = (aiIntent) => {
+    if (!aiIntent) return null;
+
+    const { intent, parameters = {} } = aiIntent;
+
+    if (!allowedActions.has(intent)) {
+      return null;
+    }
+
+    if (intent === "SEARCH_PRODUCT") {
+      return {
+        type: "SEARCH_PRODUCT",
+        value: parameters.query || "",
+        parameters,
+      };
+    }
+
+    if (intent === "RECOMMEND_PRODUCT") {
+      return {
+        type: "RECOMMEND_PRODUCT",
+        value: parameters.query || "",
+        parameters,
+      };
+    }
+
+    if (intent === "SORT_PRODUCTS") {
+      return {
+        type: "SORT_PRODUCTS",
+        value: parameters.sortBy || "relevant",
+        parameters,
+      };
+    }
+
+    return {
+      type: intent,
+      value: parameters.query || intent,
+      parameters,
+    };
   };
 
   const sendTranscriptToAI = async (text) => {
@@ -1002,6 +1408,7 @@ export default function AIAssistant() {
 
         headers: {
           "Content-Type": "application/json",
+          ...(token ? { token } : {}),
         },
 
         body: JSON.stringify({
@@ -1020,12 +1427,47 @@ export default function AIAssistant() {
 
       setStatus("idle");
       return data.reply;
-    } catch (error) {
+    } catch /*(error)*/ {
       setAiReply("Sorry, I am unable to answer right now.");
       speakText("Sorry, I am unable to answer right now.");
 
       setStatus("error");
       return "Sorry, I am unable to answer right now.";
+    }
+  };
+
+  const getAIIntent = async (text) => {
+    try {
+      const { backendUrl, apiConfigError } = getApiConfig();
+
+      if (!backendUrl) {
+        throw new Error(apiConfigError || "Backend URL is not configured");
+      }
+
+      const response = await fetch(`${backendUrl}/api/ai/intent`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          message: text,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || "AI intent detection failed");
+      }
+
+      return {
+        intent: data.intent,
+        parameters: data.parameters || {},
+      };
+    } catch (error) {
+      console.error("AI intent error:", error);
+
+      return null;
     }
   };
 
@@ -1058,12 +1500,13 @@ export default function AIAssistant() {
 
       setStatus("requesting-mic");
 
-      const recognition = voiceModeRef.current === "recognition" ? ensureRecognition() : null;
+      const recognition =
+        voiceModeRef.current === "recognition" ? ensureRecognition() : null;
 
       if (recognition) {
         listeningSessionRef.current = true;
         setStatus("listening");
-        speakText("How can I assist you?");
+        speakText(greetingLine);
         try {
           recognition.start();
         } catch {
@@ -1074,8 +1517,10 @@ export default function AIAssistant() {
       }
 
       await startMediaRecorderSession();
-    } catch (error) {
-      setVoiceError("Microphone access could not start. Please check permissions and try again.");
+    } catch /*(error)*/ {
+      setVoiceError(
+        "Microphone access could not start. Please check permissions and try again.",
+      );
       setStatus("permission-denied");
     }
   };
@@ -1176,16 +1621,16 @@ export default function AIAssistant() {
     }
   };
 
-  const formatIntent = (value) => {
+  /* const formatIntent = (value) => {
     if (!value) return "";
 
     return value
       .split("_")
       .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
       .join(" ");
-  };
+  }; */
 
-  const getFilterLabel = () => {
+  /*const getFilterLabel = () => {
     if (!searchFilters) return "";
 
     const parts = [];
@@ -1195,7 +1640,7 @@ export default function AIAssistant() {
     if (searchFilters.maxPrice) parts.push(`under ${searchFilters.maxPrice}`);
 
     return parts.join(", ");
-  };
+  };*/
 
   return (
     <>
@@ -1465,7 +1910,10 @@ bottom:20px;
             )}
 
             {securityNotice && (
-              <div className="idris-ai-message" style={{ borderColor: "#d39c9c", background: "#fff5f5" }}>
+              <div
+                className="idris-ai-message"
+                style={{ borderColor: "#d39c9c", background: "#fff5f5" }}
+              >
                 <strong>Security:</strong>
                 <br />
                 {securityNotice}
@@ -1473,7 +1921,10 @@ bottom:20px;
             )}
 
             {voiceError && (
-              <div className="idris-ai-message" style={{ borderColor: "#d9c28f", background: "#fff9ef" }}>
+              <div
+                className="idris-ai-message"
+                style={{ borderColor: "#d9c28f", background: "#fff9ef" }}
+              >
                 <strong>Voice:</strong>
                 <br />
                 {voiceError}
@@ -1481,10 +1932,14 @@ bottom:20px;
             )}
 
             {status === "unsupported" && (
-              <div className="idris-ai-message" style={{ borderColor: "#d9c28f", background: "#fff9ef" }}>
+              <div
+                className="idris-ai-message"
+                style={{ borderColor: "#d9c28f", background: "#fff9ef" }}
+              >
                 <strong>Compatibility:</strong>
                 <br />
-                This browser does not support the full voice assistant flow. Please use Chrome, Edge, or Brave.
+                This browser does not support the full voice assistant flow.
+                Please use Chrome, Edge, or Brave.
               </div>
             )}
 
@@ -1504,7 +1959,7 @@ bottom:20px;
                   width: "fit-content",
                   margin: "0 auto",
                 }}
-                >
+              >
                 Retry Voice
               </button>
             )}

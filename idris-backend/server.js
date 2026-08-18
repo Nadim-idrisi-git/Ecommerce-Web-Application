@@ -9,6 +9,7 @@ import orderRouter from './routes/orderRoute.js'
 import path from 'path'
 import chatRouter from "./routes/chatRoute.js";
 import voiceRouter from "./routes/voiceRoute.js";
+import intentRouter from "./routes/intentRoute.js";
 // App config
 const app = express()
 const port = process.env.PORT || 4000
@@ -81,6 +82,7 @@ app.use('/api/product', productRouter);
 app.use('/api/order', orderRouter);
 app.use("/api/chat", chatRouter);
 app.use("/api/voice", voiceRouter);
+app.use("/api/ai/intent", intentRouter);
 app.get('/', (req, res) => {
   res.json("API working!")
 })

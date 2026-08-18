@@ -6,7 +6,7 @@ import ProductItem from '../components/ProductItem'
 
 const Collection = () => {
 
-  const { products, search, showSearch, voiceSort, setVoiceSort, voiceCategory, setVoiceCategory } = useContext(ShopContext)
+  const { products, search, showSearch, voiceSort, setVoiceSort, voiceCategory, setVoiceCategory,  voiceSearchFilters, setVoiceSearchFilters } = useContext(ShopContext)
 
   const [showFilter,setShowFilter] = useState(false)
   const [filterProducts,setFilterProducts] = useState([])
@@ -38,31 +38,112 @@ const Collection = () => {
   }
 
 
-  const applyFilter = () => {
+ const applyFilter = () => {
+  let productsCopy = products.slice();
 
-    let productsCopy = products.slice()
+  const aiFilters = voiceSearchFilters || {};
 
-    if(showSearch && search){
-      productsCopy = productsCopy.filter(item =>
-        item.name.toLowerCase().includes(search.toLowerCase())
-      )
-    }
+  // --------------------------------
+  // AI SEARCH QUERY
+  // --------------------------------
+  const query =
+    aiFilters.query ||
+    (showSearch ? search : "");
 
-    if(category.length > 0){
-      productsCopy = productsCopy.filter(item =>
-        category.includes(item.category)
-      )
-    }
+  if (query.trim()) {
+    const searchWords = query
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean);
 
-    if(subCategory.length > 0){
-      productsCopy = productsCopy.filter(item =>
-        subCategory.includes(item.subCategory)
-      )
-    }
+    productsCopy = productsCopy.filter((item) => {
+      const searchableText = [
+        item.name,
+        item.description,
+        item.category,
+        item.subCategory,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
 
-    setFilterProducts(productsCopy)
-
+      return searchWords.every((word) =>
+        searchableText.includes(word)
+      );
+    });
   }
+
+  // --------------------------------
+  // AI CATEGORY
+  // --------------------------------
+  if (aiFilters.category) {
+    const aiCategory = aiFilters.category.toLowerCase();
+
+    productsCopy = productsCopy.filter((item) => {
+      const categoryText = [
+        item.name,
+        item.description,
+        item.category,
+        item.subCategory,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return categoryText.includes(aiCategory);
+    });
+  }
+
+  // --------------------------------
+  // AI COLOR
+  // --------------------------------
+  if (aiFilters.color) {
+    const color = aiFilters.color.toLowerCase();
+
+    productsCopy = productsCopy.filter((item) => {
+      const productText = [
+        item.name,
+        item.description,
+        item.category,
+        item.subCategory,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return productText.includes(color);
+    });
+  }
+
+  // --------------------------------
+  // AI MAX PRICE
+  // --------------------------------
+  if (aiFilters.maxPrice !== null && aiFilters.maxPrice !== undefined) {
+    productsCopy = productsCopy.filter(
+      (item) => Number(item.price) <= Number(aiFilters.maxPrice)
+    );
+  }
+
+  // --------------------------------
+  // NORMAL CATEGORY FILTER
+  // --------------------------------
+  if (category.length > 0) {
+    productsCopy = productsCopy.filter((item) =>
+      category.includes(item.category)
+    );
+  }
+
+  // --------------------------------
+  // NORMAL SUBCATEGORY FILTER
+  // --------------------------------
+  if (subCategory.length > 0) {
+    productsCopy = productsCopy.filter((item) =>
+      subCategory.includes(item.subCategory)
+    );
+  }
+
+  setFilterProducts(productsCopy);
+};
 
 
   const sortProduct = () => {
@@ -117,9 +198,16 @@ const Collection = () => {
 
 
 
-  useEffect(()=>{
-    applyFilter()
-  },[category,subCategory, search, showSearch, products])
+  useEffect(() => {
+  applyFilter();
+}, [
+  category,
+  subCategory,
+  search,
+  showSearch,
+  products,
+  voiceSearchFilters,
+]);
 
 
   useEffect(()=>{

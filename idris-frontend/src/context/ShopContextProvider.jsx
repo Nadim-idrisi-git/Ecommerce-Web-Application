@@ -21,6 +21,12 @@ const ShopContextProvider = (props) => {
   const [voiceSort, setVoiceSort] = useState("");
   const [voiceCategory, setVoiceCategory] = useState("");
   const [token, setToken] = useState(localStorage.getItem("token") || "");
+    const [voiceSearchFilters, setVoiceSearchFilters] = useState({
+  query: "",
+  category: "",
+  color: "",
+  maxPrice: null,
+});
   const [user, setUser] = useState(null);
   const [orders, setOrders] = useState([]);
   const [addresses, setAddresses] = useState([]);
@@ -384,7 +390,9 @@ setPaymentMethod,
     refreshAddresses,
     saveAddress,
     deleteAddress,
-    setDefaultAddress
+    setDefaultAddress,
+    voiceSearchFilters,
+setVoiceSearchFilters,
   };
 
   return (

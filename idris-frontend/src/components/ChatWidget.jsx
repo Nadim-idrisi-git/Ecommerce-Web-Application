@@ -1,5 +1,6 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useContext } from "react";
 import axios from "axios";
+import { ShopContext } from "../context/ShopContext";
 
 const BOT_NAME = "IDRIS. Assistant";
 const QUICK_REPLIES = [
@@ -122,6 +123,7 @@ function MessageBubble({ msg }) {
 
 function ChatWindow({ onClose }) {
   const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const { token } = useContext(ShopContext);
   const isMobile = window.innerWidth <= 768;
   const [messages, setMessages] = useState([
     {
@@ -162,7 +164,8 @@ function ChatWindow({ onClose }) {
       `${backendUrl}/api/chat`,
       {
         message: text
-      }
+      },
+      token ? { headers: { token } } : undefined
     );
 
     setTyping(false);
