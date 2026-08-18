@@ -179,7 +179,7 @@ function ChatWindow({ onClose }) {
       }
     ]);
 
-  } catch (error) {
+  } catch {
 
     setTyping(false);
 

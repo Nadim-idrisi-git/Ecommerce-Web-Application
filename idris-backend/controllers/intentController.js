@@ -1,33 +1,21 @@
 import { GoogleGenAI } from "@google/genai";
+import { assistantTools } from "../utils/assistantTools.js";
+import { assistantToolSanitizers } from "../utils/assistantToolSanitizers.js";
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
 });
 
-const allowedIntents = [
-  "OPEN_HOME",
-  "OPEN_ABOUT",
-  "OPEN_CONTACT",
-  "OPEN_CART",
-  "OPEN_COLLECTION",
-  "OPEN_PROFILE",
-  "OPEN_ADDRESSES",
-  "OPEN_ORDERS",
-  "TRACK_ORDER",
-  "SHOW_OFFERS",
-  "LOGIN",
-  "SEARCH_PRODUCT",
-  "RECOMMEND_PRODUCT",
-  "SORT_PRODUCTS",
-  "UNKNOWN",
-];
+const ALLOWED_TOOL_NAMES = new Set(assistantTools.map((tool) => tool.name));
 
-const normalizeIntent = (intent) => {
-  if (!allowedIntents.includes(intent)) {
-    return "UNKNOWN";
+const extractFunctionCall = (response) => {
+  if (response.functionCalls?.length) {
+    return response.functionCalls[0];
   }
 
-  return intent;
+  const parts = response.candidates?.[0]?.content?.parts || [];
+  const part = parts.find((item) => item.functionCall);
+  return part?.functionCall || null;
 };
 
 export const detectAIIntent = async (req, res) => {
@@ -44,130 +32,44 @@ export const detectAIIntent = async (req, res) => {
     const response = await ai.models.generateContent({
       model: "gemini-3.6-flash",
       contents: `
-You are the intent detection engine for the IDRIS ecommerce website.
+You are the action router for the IDRIS ecommerce website.
 
-Your job is ONLY to understand the customer's request and return structured JSON.
+Call exactly one of the available tools if the customer's message clearly
+asks for browsing, searching, recommendations, sorting, or navigation.
 
-You MUST NOT perform any action.
+If the message is general conversation, a question, or does not match any
+tool (e.g. small talk, store policy questions, order/account questions),
+do NOT call a tool - just respond with a short plain-text acknowledgement.
 
-Allowed intents:
-
-OPEN_HOME
-OPEN_ABOUT
-OPEN_CONTACT
-OPEN_CART
-OPEN_COLLECTION
-OPEN_PROFILE
-OPEN_ADDRESSES
-OPEN_ORDERS
-TRACK_ORDER
-SHOW_OFFERS
-LOGIN
-SEARCH_PRODUCT
-RECOMMEND_PRODUCT
-SORT_PRODUCTS
-UNKNOWN
-
-Rules:
-
-1. Return ONLY valid JSON.
-2. Never return markdown.
-3. Never invent an intent.
-4. Never create an intent for deleting, updating, adding, or modifying database data.
-5. Product searching should use SEARCH_PRODUCT.
-6. Product recommendations should use RECOMMEND_PRODUCT.
-7. Price sorting should use SORT_PRODUCTS.
-8. "track my order", "where is my order", "order status" should use TRACK_ORDER.
-9. "show my orders", "my orders", "order history" should use OPEN_ORDERS.
-10. "show my addresses", "saved addresses", "my address" should use OPEN_ADDRESSES.
-11. If the request is unrelated or unclear, use UNKNOWN.
-12. Extract search parameters when possible.
-
-For SEARCH_PRODUCT or RECOMMEND_PRODUCT:
-
-category can be:
-jacket, hoodie, sweater, shirt, t-shirt, pant, dress, saree, kids, winterwear, topwear, bottomwear
-
-color can be:
-black, white, blue, red, green, yellow, pink, brown, grey, gray, beige, navy, maroon, olive
-
-maxPrice must be a number or null.
-
-For SORT_PRODUCTS, sortBy can be:
-low-high
-high-low
-newest
-category
-relevant
-
-Return exactly this structure:
-
-{
-  "intent": "SEARCH_PRODUCT",
-  "parameters": {
-    "query": "",
-    "category": "",
-    "color": "",
-    "maxPrice": null,
-    "sortBy": ""
-  }
-}
+Never invent a tool or arguments that are not declared. Never attempt to
+delete, update, add, or otherwise modify any data - no such tool exists.
 
 Customer message:
 ${message}
       `,
+      config: {
+        tools: [{ functionDeclarations: assistantTools }],
+        toolConfig: { functionCallingConfig: { mode: "AUTO" } },
+      },
     });
 
-    let parsed;
+    const call = extractFunctionCall(response);
 
-    try {
-      const rawText = response.text?.trim() || "";
-
-      const cleanedText = rawText
-        .replace(/^```json/i, "")
-        .replace(/^```/i, "")
-        .replace(/```$/i, "")
-        .trim();
-
-      parsed = JSON.parse(cleanedText);
-    } catch (error) {
-      console.error("AI intent JSON parsing failed:", error);
-
-      return res.status(422).json({
-        success: false,
-        message: "AI returned an invalid intent",
-      });
+    if (!call || !ALLOWED_TOOL_NAMES.has(call.name)) {
+      return res.json({ success: true, tool: null });
     }
 
-    const intent = normalizeIntent(parsed.intent);
+    const sanitize = assistantToolSanitizers[call.name];
+    const sanitizedArgs = sanitize(call.args || {});
 
-    const parameters = {
-      query: typeof parsed.parameters?.query === "string"
-        ? parsed.parameters.query.trim()
-        : "",
-
-      category: typeof parsed.parameters?.category === "string"
-        ? parsed.parameters.category.trim().toLowerCase()
-        : "",
-
-      color: typeof parsed.parameters?.color === "string"
-        ? parsed.parameters.color.trim().toLowerCase()
-        : "",
-
-      maxPrice:
-        typeof parsed.parameters?.maxPrice === "number"
-          ? parsed.parameters.maxPrice
-          : null,
-
-      sortBy: typeof parsed.parameters?.sortBy === "string"
-        ? parsed.parameters.sortBy.trim().toLowerCase()
-        : "",
-    };
+    if (!sanitizedArgs) {
+      return res.json({ success: true, tool: null });
+    }
 
     return res.json({
       success: true,
-      intent,
-      parameters,
+      tool: call.name,
+      arguments: sanitizedArgs,
     });
   } catch (error) {
     console.error("AI intent detection error:", error);

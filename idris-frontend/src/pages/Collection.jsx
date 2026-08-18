@@ -3,6 +3,7 @@ import { ShopContext } from '../context/ShopContext'
 import { assets } from '../assets/assets'
 import Title from '../components/Title'
 import ProductItem from '../components/ProductItem'
+import { searchProducts } from '../utils/productSearch'
 
 const Collection = () => {
 
@@ -42,16 +43,21 @@ const Collection = () => {
   let productsCopy = products.slice();
 
   const aiFilters = voiceSearchFilters || {};
+  const hasAiFilter = Boolean(
+    (aiFilters.query || "").trim() ||
+    aiFilters.category ||
+    aiFilters.color ||
+    (aiFilters.maxPrice !== null && aiFilters.maxPrice !== undefined && aiFilters.maxPrice !== "")
+  );
 
-  // --------------------------------
-  // AI SEARCH QUERY
-  // --------------------------------
-  const query =
-    aiFilters.query ||
-    (showSearch ? search : "");
-
-  if (query.trim()) {
-    const searchWords = query
+  if (hasAiFilter) {
+    // Best-effort keyword match (utils/productSearch): scores products by
+    // how many requested keywords they match instead of requiring every
+    // one to match, so a facet the catalog has no data for (e.g. color)
+    // doesn't zero out results that otherwise clearly match.
+    productsCopy = searchProducts(productsCopy, aiFilters);
+  } else if (showSearch && search.trim()) {
+    const searchWords = search
       .toLowerCase()
       .split(/\s+/)
       .filter(Boolean);
@@ -71,57 +77,6 @@ const Collection = () => {
         searchableText.includes(word)
       );
     });
-  }
-
-  // --------------------------------
-  // AI CATEGORY
-  // --------------------------------
-  if (aiFilters.category) {
-    const aiCategory = aiFilters.category.toLowerCase();
-
-    productsCopy = productsCopy.filter((item) => {
-      const categoryText = [
-        item.name,
-        item.description,
-        item.category,
-        item.subCategory,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-
-      return categoryText.includes(aiCategory);
-    });
-  }
-
-  // --------------------------------
-  // AI COLOR
-  // --------------------------------
-  if (aiFilters.color) {
-    const color = aiFilters.color.toLowerCase();
-
-    productsCopy = productsCopy.filter((item) => {
-      const productText = [
-        item.name,
-        item.description,
-        item.category,
-        item.subCategory,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-
-      return productText.includes(color);
-    });
-  }
-
-  // --------------------------------
-  // AI MAX PRICE
-  // --------------------------------
-  if (aiFilters.maxPrice !== null && aiFilters.maxPrice !== undefined) {
-    productsCopy = productsCopy.filter(
-      (item) => Number(item.price) <= Number(aiFilters.maxPrice)
-    );
   }
 
   // --------------------------------

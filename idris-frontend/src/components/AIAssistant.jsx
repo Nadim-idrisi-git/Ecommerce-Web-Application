@@ -1,21 +1,86 @@
-import { use, useContext, useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getApiConfig } from "../config/api";
 import { ShopContext } from "../context/ShopContext";
+import { searchProducts } from "../utils/productSearch";
+
+// Every action the assistant can take lives here. The backend (/api/ai/intent)
+// declares the exact same tool names/schemas to Gemini's function calling, so
+// the model can only ever pick from this allowlist - it cannot invent a tool.
+const NAVIGATE_ROUTES = {
+  home: "/",
+  about: "/about",
+  contact: "/contact",
+  cart: "/cart",
+  collection: "/collection",
+  profile: "/profile",
+  addresses: "/addresses",
+  orders: "/orders",
+  login: "/login",
+};
+
+const NAVIGATE_SPOKEN = {
+  home: "Opening home.",
+  about: "Opening the about page.",
+  contact: "Opening the contact page.",
+  cart: "Opening your cart.",
+  collection: "Showing the collection.",
+  profile: "Opening your profile.",
+  addresses: "Opening your saved addresses.",
+  orders: "Opening your orders.",
+  login: "Taking you to login.",
+};
+
+// Only used when the backend tool-selection call itself fails (offline/network
+// error) - a lightweight, same-allowlist substitute, not a parallel system.
+const NAVIGATE_PHRASES = {
+  home: ["open home", "go home", "home page", "go to home", "go to homepage", "homepage", "go to the homepage"],
+  about: ["open about", "about page", "go to about", "about us", "open about page", "go to about page"],
+  contact: ["open contact", "contact page", "go to contact", "contact us", "support page"],
+  cart: ["open cart", "show cart", "go to cart"],
+  collection: ["open collection", "show collection", "show all products", "browse products", "show products", "shop now"],
+  profile: ["open profile", "my profile", "profile page", "go to profile", "open my profile"],
+  addresses: ["show addresses", "my addresses", "address book", "manage addresses", "view addresses", "open addresses"],
+  orders: ["my orders", "show my orders", "order history", "open orders"],
+  login: ["login", "log in", "sign in", "signin", "sign in to my account", "log into my account"],
+};
+
+// These phrases are guarded locally, before any AI call, because no matching
+// tool exists on the backend at all - the assistant must never imply it can
+// modify data or add to the cart.
+const DESTRUCTIVE_PHRASES = [
+  "delete product",
+  "remove product",
+  "erase product",
+  "wipe product",
+  "update product",
+  "edit product",
+  "modify product",
+  "change product",
+  "delete database",
+  "change database",
+  "database schema",
+  "drop collection",
+  "db update",
+];
+
+const CART_ACTION_PHRASES = [
+  "add to cart",
+  "put in cart",
+  "add item to cart",
+  "put product in cart",
+  "add this to cart",
+  "add this product to cart",
+];
 
 export default function AIAssistant() {
   const navigate = useNavigate();
   const {
     products,
-    search,
     setSearch,
-    showSearch,
     setShowSearch,
-    voiceSort,
     setVoiceSort,
-    voiceCategory,
     setVoiceCategory,
-    voiceSearchFilters,
     setVoiceSearchFilters,
     token,
     user,
@@ -40,18 +105,11 @@ export default function AIAssistant() {
 
   const [, setTranscript] = useState("");
   const [, setAiReply] = useState("");
-  const [, setIntent] = useState(null);
   const [currentAction, setCurrentAction] = useState("");
-  const [, /*searchFilters*/ setSearchFilters] = useState(null);
-  const [, setSearchResults] = useState([]);
-  const [, setRecommendationQuery] = useState("");
-  const [, setRecommendations] = useState([]);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [, setConversationHistory] = useState([]);
   const [securityNotice, setSecurityNotice] = useState("");
   const [voiceError, setVoiceError] = useState("");
-
-  //const [, setSupported] = useState(true);
 
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
@@ -72,24 +130,6 @@ export default function AIAssistant() {
     lastRecommendationQuery: "",
     lastProducts: [],
   });
-
-  const allowedActions = new Set([
-    "OPEN_HOME",
-    "OPEN_ABOUT",
-    "OPEN_CONTACT",
-    "OPEN_CART",
-    "OPEN_COLLECTION",
-    "OPEN_PROFILE",
-    "OPEN_ADDRESSES",
-    "OPEN_ORDERS",
-    "TRACK_ORDER",
-    "SHOW_OFFERS",
-    "LOGIN",
-    "SEARCH_PRODUCT",
-    "RECOMMEND_PRODUCT",
-    "SORT_PRODUCTS",
-    "OPEN_ORDERS",
-  ]);
 
   const isBraveBrowser = () =>
     Boolean(window.navigator.brave) ||
@@ -250,48 +290,6 @@ export default function AIAssistant() {
     ]);
   };
 
-  const deriveMemoryContext = (text) => {
-    const normalized = text.toLowerCase().trim();
-    const memory = memoryRef.current;
-
-    const hasFollowUpColor =
-      [
-        "black ones",
-        "white ones",
-        "blue ones",
-        "red ones",
-        "green ones",
-        "pink ones",
-        "brown ones",
-      ].some((phrase) => normalized.includes(phrase)) ||
-      /^(black|white|blue|red|green|pink|brown)\s+ones?$/.test(normalized);
-
-    const hasFollowUpCategory = [
-      "those",
-      "same ones",
-      "more like that",
-      "similar ones",
-      "more products",
-      "more like this",
-    ].some((phrase) => normalized.includes(phrase));
-
-    if (hasFollowUpColor || hasFollowUpCategory) {
-      return {
-        query: text.trim(),
-        category: memory.lastCategory || "",
-        color:
-          normalized.match(
-            /^(black|white|blue|red|green|pink|brown|yellow|grey|gray|beige|navy|maroon|olive)/,
-          )?.[1] ||
-          memory.lastColor ||
-          "",
-        maxPrice: "",
-      };
-    }
-
-    return null;
-  };
-
   const rememberSearchContext = (filters, results, query) => {
     memoryRef.current = {
       ...memoryRef.current,
@@ -308,211 +306,6 @@ export default function AIAssistant() {
       lastRecommendationQuery:
         query || memoryRef.current.lastRecommendationQuery || "",
       lastProducts: picks || memoryRef.current.lastProducts || [],
-    };
-  };
-
-  const detectIntent = (text) => {
-    const normalized = text.toLowerCase().trim();
-
-    const matchers = [
-      {
-        type: "OPEN_HOME",
-        values: [
-          "open home",
-          "go home",
-          "home page",
-          "go to home",
-          "go to homepage",
-          "homepage",
-          "go to the homepage",
-        ],
-      },
-      {
-        type: "OPEN_ABOUT",
-        values: [
-          "open about",
-          "about page",
-          "go to about",
-          "about us",
-          "open about page",
-          "go to about page",
-        ],
-      },
-      {
-        type: "OPEN_CONTACT",
-        values: [
-          "open contact",
-          "contact page",
-          "go to contact",
-          "contact us",
-          "support page",
-        ],
-      },
-      {
-        type: "OPEN_CART",
-        values: ["open cart", "show cart", "go to cart", "cart"],
-      },
-      {
-        type: "ADD_TO_THE_CART",
-        values: [
-          "add to cart",
-          "put in cart",
-          "add item to cart",
-          "put product in cart",
-          "add this to cart",
-          "add this product to cart",
-        ],
-      },
-      {
-        type: "SHOP_NOW",
-        values: ["shop now", "browse products", "show products"],
-      },
-      {
-        type: "SHOW_ADDRESSES",
-        values: [
-          "show addresses",
-          "my addresses",
-          "address book",
-          "manage addresses",
-          "view addresses",
-          "show my addresse",
-          "open addresses",
-        ],
-      },
-      {
-        type: "OPEN_COLLECTION",
-        values: [
-          "open collection",
-          "show collection",
-          "show all products",
-          "browse products",
-          "show products",
-          "shop now",
-        ],
-      },
-      {
-        type: "OPEN_PROFILE",
-        values: [
-          "open profile",
-          "my profile",
-          "profile page",
-          "go to profile",
-          "open my profile",
-        ],
-      },
-      {
-        type: "TRACK_ORDER",
-        values: [
-          "track order",
-          "where is my order",
-          "order status",
-          "track my order",
-        ],
-      },
-      {
-        type: "SHOW_OFFERS",
-        values: ["show offers", "offers", "discounts", "deals", "sale"],
-      },
-      {
-        type: "LOGIN",
-        values: [
-          "login",
-          "log in",
-          "sign in",
-          "signin",
-          "sign in to my account",
-          "log into my account",
-        ],
-      },
-      {
-        type: "SEARCH_PRODUCT",
-        values: [
-          "show me",
-          "find",
-          "search for",
-          "i want",
-          "i need",
-          "looking for",
-          "suggest products",
-          "recommend products",
-          "show me products",
-          "show me items",
-          "find items",
-          "search for items",
-          "i want items",
-          "i need items",
-          "looking for items",
-        ],
-      },
-      {
-        type: "DELETE_PRODUCT",
-        values: [
-          "delete product",
-          "remove product",
-          "erase product",
-          "wipe product",
-        ],
-      },
-      {
-        type: "UPDATE_PRODUCT",
-        values: [
-          "update product",
-          "edit product",
-          "modify product",
-          "change product",
-        ],
-      },
-      {
-        type: "DATABASE_MODIFY",
-        values: [
-          "database",
-          "collection schema",
-          "change database",
-          "db update",
-        ],
-      },
-      {
-        type: "SORT_PRODUCTS",
-        values: [
-          "sort products by price low to high",
-          "sort products by price high to low",
-          "sort products",
-          "sort by price",
-          "price wise",
-          "latest",
-          "newest",
-          "category wise",
-          "sort by category",
-          "low to high",
-          "high to low",
-        ],
-      },
-    ];
-
-    const matched = matchers.find(({ values }) =>
-      values.some((phrase) => normalized.includes(phrase)),
-    );
-
-    if (!matched) {
-      return {
-        type: "UNKNOWN",
-        value: normalized,
-      };
-    }
-
-    const searchValue =
-      matched.type === "SEARCH_PRODUCT"
-        ? normalized
-            .replace(
-              /^(show me|find|search for|i want|i need|looking for)\s*/i,
-              "",
-            )
-            .trim()
-        : normalized;
-
-    return {
-      type: matched.type,
-      value: searchValue || normalized,
     };
   };
 
@@ -704,8 +497,6 @@ export default function AIAssistant() {
     ].some((phrase) => normalized.includes(phrase));
   };
 
-  const detectRecommendationIntent = (text) => isRecommendationRequest(text);
-
   const detectSortIntent = (text) => {
     const normalized = text.toLowerCase().trim();
 
@@ -719,7 +510,7 @@ export default function AIAssistant() {
         "sort by price low to high",
       ].some((phrase) => normalized.includes(phrase))
     ) {
-      return { type: "SORT_PRODUCTS", value: "low-high" };
+      return { sortBy: "low-high" };
     }
 
     if (
@@ -733,7 +524,7 @@ export default function AIAssistant() {
         "sort products by descending price",
       ].some((phrase) => normalized.includes(phrase))
     ) {
-      return { type: "SORT_PRODUCTS", value: "high-low" };
+      return { sortBy: "high-low" };
     }
 
     if (
@@ -748,7 +539,7 @@ export default function AIAssistant() {
         "sort by newest",
       ].some((phrase) => normalized.includes(phrase))
     ) {
-      return { type: "SORT_PRODUCTS", value: "newest" };
+      return { sortBy: "newest" };
     }
 
     if (
@@ -760,7 +551,221 @@ export default function AIAssistant() {
         "sort by category wise",
       ].some((phrase) => normalized.includes(phrase))
     ) {
-      return { type: "SORT_PRODUCTS", value: "category" };
+      return { sortBy: "category" };
+    }
+
+    return null;
+  };
+
+  const findProductByQuery = (query) => {
+    const normalized = (query || "").toLowerCase().trim();
+    if (!normalized) return null;
+
+    const exact = products.find(
+      (product) => (product.name || "").toLowerCase() === normalized,
+    );
+    if (exact) return exact;
+
+    const partial = products.find((product) =>
+      (product.name || "").toLowerCase().includes(normalized),
+    );
+    if (partial) return partial;
+
+    const words = normalized.split(/\s+/).filter(Boolean);
+    const scored = products
+      .map((product) => {
+        const name = (product.name || "").toLowerCase();
+        const score = words.filter((word) => name.includes(word)).length;
+        return { product, score };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    return scored[0]?.product || null;
+  };
+
+  const isDestructiveRequest = (text) => {
+    const normalized = text.toLowerCase();
+    return DESTRUCTIVE_PHRASES.some((phrase) => normalized.includes(phrase));
+  };
+
+  const isCartActionRequest = (text) => {
+    const normalized = text.toLowerCase();
+    return CART_ACTION_PHRASES.some((phrase) => normalized.includes(phrase));
+  };
+
+  const handleRecommendationQuery = (text) => {
+    const keywords = getRecommendationKeywords(text);
+    const picks = scoreRecommendations(keywords);
+    const responseText =
+      picks.length > 0
+        ? `${firstName ? `Sure, ${firstName}. ` : ""}I recommend ${picks.map((item) => item.name).join(", ")}.`
+        : "I could not find a strong recommendation, so I opened the catalog.";
+
+    setCurrentAction(
+      picks.length > 0
+        ? `Showing ${picks.length} recommended products`
+        : "No strong recommendation match found",
+    );
+    setAiReply(responseText);
+    speakText(responseText);
+    rememberRecommendationContext(text.trim(), picks);
+    setSearch("");
+    setShowSearch(false);
+    navigate("/collection");
+    return responseText;
+  };
+
+  // Single dispatcher for every allowlisted tool, whether it was chosen by
+  // Gemini (via /api/ai/intent) or by the offline local fallback matcher.
+  // `arguments` here are whatever the backend already sanitized/validated.
+  const runTool = (tool, args = {}, rawText = "") => {
+    setSecurityNotice("");
+
+    switch (tool) {
+      case "navigate": {
+        const path = NAVIGATE_ROUTES[args.destination];
+        if (!path) return "";
+
+        setCurrentAction(`Opening ${args.destination}`);
+        navigate(path);
+
+        const spoken = NAVIGATE_SPOKEN[args.destination] || "Done.";
+        setAiReply(spoken);
+        speakText(spoken);
+        return spoken;
+      }
+
+      case "search_products": {
+        const filters = {
+          query: args.query || rawText,
+          category: args.category || "",
+          color: args.color || "",
+          maxPrice: args.maxPrice ?? "",
+        };
+
+        const matchingProducts = searchProducts(products, filters);
+
+        setVoiceSearchFilters({
+          query: filters.query,
+          category: filters.category,
+          color: filters.color,
+          maxPrice: filters.maxPrice || null,
+        });
+        setSearch(filters.query);
+        setShowSearch(true);
+        navigate("/collection");
+
+        const spoken =
+          matchingProducts.length > 0
+            ? `${firstName ? `Sure, ${firstName}. ` : ""}I found ${matchingProducts.length} matching products.`
+            : "I could not find any matching products.";
+
+        setCurrentAction(
+          matchingProducts.length > 0
+            ? `Showing ${matchingProducts.length} matching products`
+            : "No matching products found",
+        );
+
+        setAiReply(spoken);
+        rememberSearchContext(filters, matchingProducts, filters.query);
+        speakText(spoken);
+        return spoken;
+      }
+
+      case "recommend_products":
+        return handleRecommendationQuery(args.query || rawText);
+
+      case "sort_products": {
+        const sortBy = args.sortBy || "relevant";
+
+        if (sortBy === "category") {
+          const categoryKeyword = [
+            "men", "women", "kids", "jacket", "hoodie", "sweater", "shirt",
+            "pants", "dress", "saree", "winterwear", "topwear", "bottomwear",
+          ].find((word) => rawText.toLowerCase().includes(word));
+
+          if (categoryKeyword) {
+            setVoiceCategory(
+              categoryKeyword.charAt(0).toUpperCase() + categoryKeyword.slice(1),
+            );
+          }
+
+          setVoiceSort("relevant");
+          navigate("/collection");
+
+          const spoken = "Showing items by category.";
+          setCurrentAction(spoken);
+          setAiReply(spoken);
+          speakText(spoken);
+          return spoken;
+        }
+
+        setVoiceSort(sortBy);
+        navigate("/collection");
+
+        const spoken =
+          sortBy === "low-high"
+            ? "Sorting products from low to high price."
+            : sortBy === "high-low"
+              ? "Sorting products from high to low price."
+              : "Showing the latest products.";
+
+        setCurrentAction(spoken);
+        setAiReply(spoken);
+        speakText(spoken);
+        return spoken;
+      }
+
+      case "open_product": {
+        const match = findProductByQuery(args.query || rawText);
+
+        if (!match) {
+          const spoken = `I could not find a product called "${args.query || rawText}".`;
+          setCurrentAction("Product not found");
+          setAiReply(spoken);
+          speakText(spoken);
+          return spoken;
+        }
+
+        setCurrentAction(`Opening ${match.name}`);
+        navigate(`/product/${match._id}`);
+
+        const spoken = `Opening ${match.name}.`;
+        setAiReply(spoken);
+        speakText(spoken);
+        return spoken;
+      }
+
+      default:
+        return "";
+    }
+  };
+
+  // Backend/offline substitute for the AI tool call - same allowlist, no
+  // network round trip. Only used when getAssistantTool() throws.
+  const localFallbackTool = (text) => {
+    const normalized = text.toLowerCase().trim();
+
+    const sortIntent = detectSortIntent(normalized);
+    if (sortIntent) {
+      return { tool: "sort_products", arguments: sortIntent };
+    }
+
+    const navigateEntry = Object.entries(NAVIGATE_PHRASES).find(([, phrases]) =>
+      phrases.some((phrase) => normalized.includes(phrase)),
+    );
+    if (navigateEntry) {
+      return { tool: "navigate", arguments: { destination: navigateEntry[0] } };
+    }
+
+    if (isRecommendationRequest(normalized)) {
+      return { tool: "recommend_products", arguments: { query: text } };
+    }
+
+    const searchTriggers = ["show me", "find", "search for", "i want", "i need", "looking for"];
+    if (searchTriggers.some((phrase) => normalized.includes(phrase))) {
+      return { tool: "search_products", arguments: extractSearchFilters(text) };
     }
 
     return null;
@@ -857,22 +862,6 @@ export default function AIAssistant() {
     recorder.start(250);
   };
 
-  const buildFiltersFromAIIntent = (detectedIntent, originalText) => {
-    const parameters = detectedIntent?.parameters || {};
-
-    const fallbackFilters = extractSearchFilters(originalText);
-
-    return {
-      query: parameters.query || fallbackFilters.query || originalText.trim(),
-
-      category: parameters.category || fallbackFilters.category || "",
-
-      color: parameters.color || fallbackFilters.color || "",
-
-      maxPrice: parameters.maxPrice ?? fallbackFilters.maxPrice ?? "",
-    };
-  };
-
   const processVoiceText = async (text) => {
     const normalizedText = text.trim();
 
@@ -881,106 +870,47 @@ export default function AIAssistant() {
     setTranscript(normalizedText);
     pushHistory("user", normalizedText);
 
-    const memoryFilters = deriveMemoryContext(normalizedText);
-
-    // First try AI intent detection
-    const aiIntentResponse = await getAIIntent(normalizedText);
-    if (aiIntentResponse?.intent === "SEARCH_PRODUCT") {
-      setVoiceSearchFilters({
-        query: aiIntentResponse.parameters?.query || "",
-        category: aiIntentResponse.parameters?.category || "",
-        color: aiIntentResponse.parameters?.color || "",
-        maxPrice: aiIntentResponse.parameters?.maxPrice ?? null,
-      });
-    }
-
-    let detectedIntent = null;
-
-    if (aiIntentResponse) {
-      detectedIntent = convertAIIntentToLocalIntent(
-        validateAIIntent(aiIntentResponse),
-      );
-    }
-
-    // Fallback to existing rule-based intent detection
-    if (!detectedIntent) {
-      detectedIntent = detectIntent(normalizedText);
-    }
-
-    setIntent(detectedIntent);
-
-    // Existing local sort detection remains as a fallback
-    const sortCommandResponse = handleSortCommand(normalizedText);
-
-    if (
-      sortCommandResponse &&
-      (!detectedIntent || detectedIntent.type === "UNKNOWN")
-    ) {
-      setIntent({
-        type: "SORT_PRODUCTS",
-        value: normalizedText,
-      });
-
-      pushHistory("assistant", sortCommandResponse);
-
-      return sortCommandResponse;
-    }
-
-    executeIntentAction(detectedIntent);
-
-    const filters =
-      detectedIntent?.type === "SEARCH_PRODUCT"
-        ? buildFiltersFromAIIntent(detectedIntent, normalizedText)
-        : memoryFilters || null;
-
-    setSearchFilters(filters);
-
-    const matchingProducts = filters ? filterProducts(filters) : [];
-
-    setSearchResults(matchingProducts);
-
-    let assistantResponse = "";
-
-    if (
-      detectedIntent?.type === "DELETE_PRODUCT" ||
-      detectedIntent?.type === "UPDATE_PRODUCT" ||
-      detectedIntent?.type === "DATABASE_MODIFY"
-    ) {
-      assistantResponse =
+    // No tool exists for these on the backend at all - blocked before any
+    // AI call so the assistant can never imply it performed the action.
+    if (isDestructiveRequest(normalizedText)) {
+      const blockedMessage =
         "I cannot perform that action. I can only help with browsing, search, recommendations, and navigation.";
 
       setSecurityNotice(
-        "Blocked unsafe action: database modification is not available to the AI Assistant.",
+        "Blocked unsafe action: database/product modification is not available to the AI Assistant.",
       );
+      setCurrentAction("Blocked unsafe action");
+      setAiReply(blockedMessage);
+      speakText(blockedMessage);
+      pushHistory("assistant", blockedMessage);
+      return blockedMessage;
+    }
 
-      speakText(assistantResponse);
-    } else if (detectedIntent?.type === "SEARCH_PRODUCT") {
-      assistantResponse =
-        matchingProducts.length > 0
-          ? `${firstName ? `Sure, ${firstName}. ` : ""}I found ${matchingProducts.length} matching products.`
-          : "I could not find an exact match, so I opened the collection.";
+    if (isCartActionRequest(normalizedText)) {
+      const message = "I cannot add items to the cart yet. Please use the Add to Cart button.";
+      setCurrentAction("Cart action unsupported");
+      setAiReply(message);
+      speakText(message);
+      pushHistory("assistant", message);
+      return message;
+    }
 
-      setSearch(filters.query);
-      setShowSearch(true);
+    let toolCall = null;
 
-      navigate("/collection");
+    try {
+      toolCall = await getAssistantTool(normalizedText);
+    } catch (error) {
+      console.error("AI tool selection error:", error);
+      toolCall = localFallbackTool(normalizedText);
+    }
 
-      setCurrentAction(
-        matchingProducts.length > 0
-          ? `Showing ${matchingProducts.length} matching products`
-          : "No exact match found, showing collection",
-      );
+    let assistantResponse = "";
 
-      setAiReply(assistantResponse);
-
-      rememberSearchContext(filters, matchingProducts, filters.query);
-
-      speakText(assistantResponse);
-    } else if (detectedIntent?.type === "RECOMMEND_PRODUCT") {
-      assistantResponse = handleRecommendationQuery(
-        detectedIntent.parameters?.query || normalizedText,
-      );
+    if (toolCall?.tool) {
+      assistantResponse = runTool(toolCall.tool, toolCall.arguments || {}, normalizedText);
     } else {
+      // No tool matched (or the model chose not to call one) - hand off to
+      // the general conversational assistant instead.
       assistantResponse = await sendTranscriptToAI(normalizedText);
     }
 
@@ -1091,308 +1021,6 @@ export default function AIAssistant() {
     return recognition;
   };
 
-  const filterProducts = (filters) => {
-    if (!filters) return [];
-
-    const query = filters.query.toLowerCase();
-
-    return products.filter((product) => {
-      const name = (product.name || "").toLowerCase();
-      const category = (product.category || "").toLowerCase();
-      const subCategory = (product.subCategory || "").toLowerCase();
-      const description = (product.description || "").toLowerCase();
-      const color = (product.color || "").toLowerCase();
-      const price = Number(product.price || 0);
-
-      const queryMatch =
-        !query ||
-        name.includes(query) ||
-        description.includes(query) ||
-        category.includes(query);
-
-      const categoryMatch =
-        !filters.category ||
-        category.includes(filters.category) ||
-        subCategory.includes(filters.category);
-      const colorMatch =
-        !filters.color ||
-        color.includes(filters.color) ||
-        name.includes(filters.color) ||
-        description.includes(filters.color);
-      const priceMatch = !filters.maxPrice || price <= filters.maxPrice;
-
-      return queryMatch && categoryMatch && colorMatch && priceMatch;
-    });
-  };
-
-  const executeIntentAction = (detectedIntent) => {
-    if (!detectedIntent?.type) return null;
-
-    /*if (!allowedActions[detectedIntent.type]) {
-      const blockedMessage =
-        "I cannot do that action. I can only help with browsing, search, and navigation.";
-
-      setSecurityNotice(
-        "Blocked unsafe action: the assistant is not allowed to delete, update, or modify database data.",
-      );
-      setCurrentAction("Blocked unsafe action");
-      setAiReply(blockedMessage);
-      speakText(blockedMessage);
-      setStatus("error");
-      return;
-    }*/
-
-    setSecurityNotice("");
-
-    switch (detectedIntent.type) {
-      case "ADD_TO_THE_CART":
-        setCurrentAction("Adding to cart");
-        setAiReply("I cannot add items to the cart. Please do it manually.");
-        speakText("I cannot add items to the cart. Please do it manually.");
-        return;
-
-      case "SHOP_NOW":
-        setCurrentAction("Opening collection");
-        navigate("/collection");
-        setAiReply("Showing the collection.");
-        speakText("Showing the collection.");
-        return;
-
-      case "OPEN_ADDRESSES":
-      case "SHOW_ADDRESSES":
-        setCurrentAction("Opening addresses");
-        navigate("/addresses");
-        setAiReply("Opening your saved addresses.");
-        speakText("Opening your saved addresses.");
-        return;
-
-      case "OPEN_HOME":
-        setCurrentAction("Opening home");
-        navigate("/");
-        setAiReply("sure Opening home.");
-        speakText("Opening home.");
-        return;
-
-      case "OPEN_ABOUT":
-        setCurrentAction("Opening about");
-        navigate("/about");
-        setAiReply("Opening about page.");
-        speakText("Opening about page.");
-        return;
-
-      case "OPEN_CONTACT":
-        setCurrentAction("Opening contact");
-        navigate("/contact");
-        setAiReply("Opening contact page.");
-        speakText("Opening contact page.");
-        return;
-
-      case "OPEN_CART":
-        setCurrentAction("Opening cart");
-        navigate("/cart");
-        setAiReply("Opening your cart.");
-        speakText("Opening your cart.");
-        return;
-
-      case "OPEN_COLLECTION":
-        setCurrentAction("Opening collection");
-        navigate("/collection");
-        setAiReply("Showing the collection.");
-        speakText("Showing the collection.");
-        return;
-
-      case "OPEN_PROFILE":
-        setCurrentAction("Opening profile");
-        navigate("/profile");
-        setAiReply("Opening your profile.");
-        speakText("Opening your profile.");
-        return;
-
-      case "LOGIN":
-        setCurrentAction("Opening login");
-        navigate("/login");
-        setAiReply("Taking you to login.");
-        speakText("Taking you to login.");
-        return;
-
-      case "TRACK_ORDER":
-        setCurrentAction("");
-        setAiReply("");
-        speakText("");
-        return;
-
-      case "SHOW_OFFERS":
-        setCurrentAction("Showing offers");
-        navigate("/collection");
-        setAiReply("I am showing available offers in the collection.");
-        speakText("I am showing available offers in the collection.");
-        return;
-
-      case "SEARCH_PRODUCT": {
-        const filters = buildFiltersFromAIIntent(
-          detectedIntent,
-          detectedIntent.value,
-        );
-
-        setCurrentAction("Search intent detected");
-        setSearchFilters(filters);
-
-        return;
-      }
-
-      case "RECOMMEND_PRODUCT":
-        setCurrentAction("Recommendation intent detected");
-        return;
-
-      case "SORT_PRODUCTS":
-        setCurrentAction("Sort intent detected");
-        return;
-
-      case "OPEN_ORDERS":
-        setCurrentAction("Opening orders");
-        navigate("/orders");
-        setAiReply("Opening your orders.");
-        speakText("Opening your orders.");
-        return;
-
-      default:
-        setCurrentAction("");
-    }
-  };
-
-  const handleRecommendationQuery = (text) => {
-    const keywords = getRecommendationKeywords(text);
-    const picks = scoreRecommendations(keywords);
-    const responseText =
-      picks.length > 0
-        ? `${firstName ? `Sure, ${firstName}. ` : ""}I recommend ${picks.map((item) => item.name).join(", ")}.`
-        : "I could not find a strong recommendation, so I opened the catalog.";
-
-    setRecommendationQuery(text.trim());
-    setRecommendations(picks);
-    setCurrentAction(
-      picks.length > 0
-        ? `Showing ${picks.length} recommended products`
-        : "No strong recommendation match found",
-    );
-    setAiReply(responseText);
-    speakText(responseText);
-    rememberRecommendationContext(text.trim(), picks);
-    setSearch("");
-    setShowSearch(false);
-    navigate("/collection");
-    return responseText;
-  };
-
-  const handleSortCommand = (text) => {
-    const sortIntent = detectSortIntent(text);
-
-    if (!sortIntent) return "";
-
-    if (sortIntent.value === "category") {
-      const categoryKeyword = [
-        "men",
-        "women",
-        "kids",
-        "jacket",
-        "hoodie",
-        "sweater",
-        "shirt",
-        "pants",
-        "dress",
-        "saree",
-        "winterwear",
-        "topwear",
-        "bottomwear",
-      ].find((word) => text.toLowerCase().includes(word));
-
-      if (categoryKeyword) {
-        setVoiceCategory(
-          ["men", "women", "kids"].includes(categoryKeyword)
-            ? categoryKeyword.charAt(0).toUpperCase() + categoryKeyword.slice(1)
-            : categoryKeyword.charAt(0).toUpperCase() +
-                categoryKeyword.slice(1),
-        );
-      }
-
-      setVoiceSort("relevant");
-      navigate("/collection");
-      setAiReply("Showing items by category.");
-      speakText("Showing items by category.");
-      return "Showing items by category.";
-    }
-
-    setVoiceSort(sortIntent.value);
-    navigate("/collection");
-
-    const spoken =
-      sortIntent.value === "low-high"
-        ? "Sorting products from low to high price."
-        : sortIntent.value === "high-low"
-          ? "Sorting products from high to low price."
-          : "Showing the latest products.";
-
-    setAiReply(spoken);
-    speakText(spoken);
-    return spoken;
-  };
-
-  const validateAIIntent = (aiIntent) => {
-    if (!aiIntent?.intent) {
-      return null;
-    }
-
-    if (!allowedActions.has(aiIntent.intent)) {
-      setSecurityNotice("This action is not allowed by the AI Assistant.");
-
-      setCurrentAction("Blocked unsafe action");
-
-      return null;
-    }
-
-    return aiIntent;
-  };
-
-  const convertAIIntentToLocalIntent = (aiIntent) => {
-    if (!aiIntent) return null;
-
-    const { intent, parameters = {} } = aiIntent;
-
-    if (!allowedActions.has(intent)) {
-      return null;
-    }
-
-    if (intent === "SEARCH_PRODUCT") {
-      return {
-        type: "SEARCH_PRODUCT",
-        value: parameters.query || "",
-        parameters,
-      };
-    }
-
-    if (intent === "RECOMMEND_PRODUCT") {
-      return {
-        type: "RECOMMEND_PRODUCT",
-        value: parameters.query || "",
-        parameters,
-      };
-    }
-
-    if (intent === "SORT_PRODUCTS") {
-      return {
-        type: "SORT_PRODUCTS",
-        value: parameters.sortBy || "relevant",
-        parameters,
-      };
-    }
-
-    return {
-      type: intent,
-      value: parameters.query || intent,
-      parameters,
-    };
-  };
-
   const sendTranscriptToAI = async (text) => {
     try {
       setStatus("thinking");
@@ -1436,39 +1064,34 @@ export default function AIAssistant() {
     }
   };
 
-  const getAIIntent = async (text) => {
-    try {
-      const { backendUrl, apiConfigError } = getApiConfig();
+  // Calls the backend's allowlisted tool-selection endpoint. Returns null
+  // when the model didn't choose any tool (i.e. this is general conversation,
+  // not an actionable request) - throws on network/config failure so the
+  // caller can fall back to localFallbackTool.
+  const getAssistantTool = async (text) => {
+    const { backendUrl, apiConfigError } = getApiConfig();
 
-      if (!backendUrl) {
-        throw new Error(apiConfigError || "Backend URL is not configured");
-      }
-
-      const response = await fetch(`${backendUrl}/api/ai/intent`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          message: text,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok || !data.success) {
-        throw new Error(data.message || "AI intent detection failed");
-      }
-
-      return {
-        intent: data.intent,
-        parameters: data.parameters || {},
-      };
-    } catch (error) {
-      console.error("AI intent error:", error);
-
-      return null;
+    if (!backendUrl) {
+      throw new Error(apiConfigError || "Backend URL is not configured");
     }
+
+    const response = await fetch(`${backendUrl}/api/ai/intent`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: text,
+      }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || !data.success) {
+      throw new Error(data.message || "AI tool selection failed");
+    }
+
+    return data.tool ? { tool: data.tool, arguments: data.arguments || {} } : null;
   };
 
   const getSupportedMimeType = () => {
@@ -1496,7 +1119,6 @@ export default function AIAssistant() {
       voiceModeRef.current = isBraveBrowser() ? "media" : "recognition";
       setTranscript("");
       setAiReply("");
-      setIntent(null);
 
       setStatus("requesting-mic");
 
@@ -1620,27 +1242,6 @@ export default function AIAssistant() {
         return "Ready to talk";
     }
   };
-
-  /* const formatIntent = (value) => {
-    if (!value) return "";
-
-    return value
-      .split("_")
-      .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
-      .join(" ");
-  }; */
-
-  /*const getFilterLabel = () => {
-    if (!searchFilters) return "";
-
-    const parts = [];
-
-    if (searchFilters.category) parts.push(searchFilters.category);
-    if (searchFilters.color) parts.push(searchFilters.color);
-    if (searchFilters.maxPrice) parts.push(`under ${searchFilters.maxPrice}`);
-
-    return parts.join(", ");
-  };*/
 
   return (
     <>
