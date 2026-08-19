@@ -94,15 +94,63 @@ const SIZE_ALIASES = {
 // Only used when the backend tool-selection call itself fails (offline/network
 // error) - a lightweight, same-allowlist substitute, not a parallel system.
 const NAVIGATE_PHRASES = {
-  home: ["open home", "go home", "home page", "go to home", "go to homepage", "homepage", "go to the homepage"],
-  about: ["open about", "about page", "go to about", "about us", "open about page", "go to about page"],
-  contact: ["open contact", "contact page", "go to contact", "contact us", "support page"],
+  home: [
+    "open home",
+    "go home",
+    "home page",
+    "go to home",
+    "go to homepage",
+    "homepage",
+    "go to the homepage",
+  ],
+  about: [
+    "open about",
+    "about page",
+    "go to about",
+    "about us",
+    "open about page",
+    "go to about page",
+  ],
+  contact: [
+    "open contact",
+    "contact page",
+    "go to contact",
+    "contact us",
+    "support page",
+  ],
   cart: ["open cart", "show cart", "go to cart"],
-  collection: ["open collection", "show collection", "show all products", "browse products", "show products", "shop now"],
-  profile: ["open profile", "my profile", "profile page", "go to profile", "open my profile"],
-  addresses: ["show addresses", "my addresses", "address book", "manage addresses", "view addresses", "open addresses"],
+  collection: [
+    "open collection",
+    "show collection",
+    "show all products",
+    "browse products",
+    "show products",
+    "shop now",
+  ],
+  profile: [
+    "open profile",
+    "my profile",
+    "profile page",
+    "go to profile",
+    "open my profile",
+  ],
+  addresses: [
+    "show addresses",
+    "my addresses",
+    "address book",
+    "manage addresses",
+    "view addresses",
+    "open addresses",
+  ],
   orders: ["my orders", "show my orders", "order history", "open orders"],
-  login: ["login", "log in", "sign in", "signin", "sign in to my account", "log into my account"],
+  login: [
+    "login",
+    "log in",
+    "sign in",
+    "signin",
+    "sign in to my account",
+    "log into my account",
+  ],
 };
 
 // These phrases are guarded locally, before any AI call, because no matching
@@ -485,7 +533,11 @@ export default function AIAssistant() {
     const sampleCount = Math.floor(bytes.length / 2);
     if (sampleCount <= 0) return;
 
-    const audioBuffer = audioContext.createBuffer(1, sampleCount, SPEECH_SAMPLE_RATE);
+    const audioBuffer = audioContext.createBuffer(
+      1,
+      sampleCount,
+      SPEECH_SAMPLE_RATE,
+    );
     const channelData = audioBuffer.getChannelData(0);
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
@@ -497,7 +549,10 @@ export default function AIAssistant() {
     source.buffer = audioBuffer;
     source.connect(audioContext.destination);
 
-    const startAt = Math.max(liveNextStartTimeRef.current, audioContext.currentTime);
+    const startAt = Math.max(
+      liveNextStartTimeRef.current,
+      audioContext.currentTime,
+    );
     source.start(startAt);
     liveNextStartTimeRef.current = startAt + audioBuffer.duration;
 
@@ -506,7 +561,10 @@ export default function AIAssistant() {
       livePendingSourcesRef.current = livePendingSourcesRef.current.filter(
         (item) => item !== source,
       );
-      if (generation === liveGenerationRef.current && livePendingSourcesRef.current.length === 0) {
+      if (
+        generation === liveGenerationRef.current &&
+        livePendingSourcesRef.current.length === 0
+      ) {
         setIsSpeaking(false);
       }
     };
@@ -550,7 +608,9 @@ export default function AIAssistant() {
         throw new Error("Speech stream request failed");
       }
 
-      const audioContext = new AudioContextClass({ sampleRate: SPEECH_SAMPLE_RATE });
+      const audioContext = new AudioContextClass({
+        sampleRate: SPEECH_SAMPLE_RATE,
+      });
       liveAudioContextRef.current = audioContext;
       liveNextStartTimeRef.current = 0;
       if (audioContext.resume) {
@@ -602,7 +662,10 @@ export default function AIAssistant() {
       }
     } catch (error) {
       if (generation !== liveGenerationRef.current) return;
-      console.error("Streamed voice failed, falling back to browser voice:", error);
+      console.error(
+        "Streamed voice failed, falling back to browser voice:",
+        error,
+      );
       speakWithBrowserVoice(text, speechLang);
     } finally {
       clearTimeout(safetyTimeout);
@@ -665,7 +728,9 @@ export default function AIAssistant() {
 
     memoryRef.current = {
       ...memoryRef.current,
-      activityLog: [...memoryRef.current.activityLog, summary].slice(-MAX_ACTIVITY_LOG),
+      activityLog: [...memoryRef.current.activityLog, summary].slice(
+        -MAX_ACTIVITY_LOG,
+      ),
     };
   };
 
@@ -961,7 +1026,9 @@ export default function AIAssistant() {
       (filters.query || "").trim() ||
       filters.category ||
       filters.color ||
-      (filters.maxPrice !== null && filters.maxPrice !== undefined && filters.maxPrice !== "")
+      (filters.maxPrice !== null &&
+        filters.maxPrice !== undefined &&
+        filters.maxPrice !== ""),
     );
 
     return hasFilter ? searchProducts(products, filters) : products;
@@ -975,7 +1042,8 @@ export default function AIAssistant() {
   // an open/closed flag, nothing else.
   const getUIContext = () => {
     const page = getPageForPath(location.pathname);
-    const productId = page === "product" ? location.pathname.split("/product/")[1] : "";
+    const productId =
+      page === "product" ? location.pathname.split("/product/")[1] : "";
     const selectedProduct = productId
       ? products.find((product) => product._id === productId) || null
       : null;
@@ -987,8 +1055,13 @@ export default function AIAssistant() {
     } else if (page === "collection") {
       visibleProducts = getVisibleCollectionProducts();
     } else if (page === "home") {
-      const bestsellers = products.filter((product) => product.bestseller).slice(0, 5);
-      const latest = products.slice().sort((a, b) => b.date - a.date).slice(0, 10);
+      const bestsellers = products
+        .filter((product) => product.bestseller)
+        .slice(0, 5);
+      const latest = products
+        .slice()
+        .sort((a, b) => b.date - a.date)
+        .slice(0, 10);
       visibleProducts = [...bestsellers, ...latest];
     } else if (page === "cart") {
       const byId = new Map(products.map((product) => [product._id, product]));
@@ -1008,7 +1081,13 @@ export default function AIAssistant() {
 
       Object.entries(sizes || {}).forEach(([size, quantity]) => {
         if (quantity > 0) {
-          cartLines.push({ productId, name: product.name, size, quantity, price: product.price });
+          cartLines.push({
+            productId,
+            name: product.name,
+            size,
+            quantity,
+            price: product.price,
+          });
         }
       });
     });
@@ -1022,8 +1101,12 @@ export default function AIAssistant() {
 
     return {
       page,
-      visibleProducts: visibleProducts.slice(0, 12).map(summarizeProductForContext),
-      selectedProduct: selectedProduct ? summarizeProductForContext(selectedProduct) : null,
+      visibleProducts: visibleProducts
+        .slice(0, 12)
+        .map(summarizeProductForContext),
+      selectedProduct: selectedProduct
+        ? summarizeProductForContext(selectedProduct)
+        : null,
       activeSearch: voiceSearchFilters?.query || "",
       cartLines: cartLines.slice(0, 20),
       recentOrders,
@@ -1048,7 +1131,11 @@ export default function AIAssistant() {
   // consent was given, only a literal reading of the next utterance.
   const parseYesNo = (text) => {
     const normalized = text.toLowerCase().trim();
-    if (/^(yes|yeah|yep|yup|sure|confirm|confirmed|go ahead|do it|okay|ok|please do|correct)\b/.test(normalized)) {
+    if (
+      /^(yes|yeah|yep|yup|sure|confirm|confirmed|go ahead|do it|okay|ok|please do|correct)\b/.test(
+        normalized,
+      )
+    ) {
       return "yes";
     }
     if (/^(no|nope|nah|cancel|never\s?mind|stop|don'?t)\b/.test(normalized)) {
@@ -1064,18 +1151,28 @@ export default function AIAssistant() {
       return { cancel: true };
     }
 
-    if (/\b(any size|any|you (choose|pick|decide)|whatever|doesn'?t matter|surprise me)\b/.test(normalized)) {
+    if (
+      /\b(any size|any|you (choose|pick|decide)|whatever|doesn'?t matter|surprise me)\b/.test(
+        normalized,
+      )
+    ) {
       return { autoSelect: true };
     }
 
     const directHit = availableSizes.find(
-      (size) => normalized === size.toLowerCase() || normalized.includes(size.toLowerCase()),
+      (size) =>
+        normalized === size.toLowerCase() ||
+        normalized.includes(size.toLowerCase()),
     );
     if (directHit) return { size: directHit };
 
-    const aliasEntry = Object.entries(SIZE_ALIASES).find(([phrase]) => normalized.includes(phrase));
+    const aliasEntry = Object.entries(SIZE_ALIASES).find(([phrase]) =>
+      normalized.includes(phrase),
+    );
     if (aliasEntry) {
-      const mapped = availableSizes.find((size) => size.toLowerCase() === aliasEntry[1].toLowerCase());
+      const mapped = availableSizes.find(
+        (size) => size.toLowerCase() === aliasEntry[1].toLowerCase(),
+      );
       if (mapped) return { size: mapped };
     }
 
@@ -1085,7 +1182,8 @@ export default function AIAssistant() {
   // Finds the product a cart/order-adjacent tool call is referring to,
   // preferring a resolved id from context over a fuzzy name search.
   const resolveProductFromArgs = (args, rawText) =>
-    (args.productId && products.find((product) => product._id === args.productId)) ||
+    (args.productId &&
+      products.find((product) => product._id === args.productId)) ||
     findProductByQuery(args.query || rawText);
 
   const handleRecommendationQuery = (text) => {
@@ -1127,10 +1225,15 @@ export default function AIAssistant() {
     }
 
     const availableSizes = product.sizes || product.size || [];
-    const resolvedSize = size || (availableSizes.length ? availableSizes[0] : "");
+    const resolvedSize =
+      size || (availableSizes.length ? availableSizes[0] : "");
     const currentQuantity = cartItems?.[productId]?.[resolvedSize] || 0;
 
-    setCartItemQuantity(productId, resolvedSize, currentQuantity + (quantity || 1));
+    setCartItemQuantity(
+      productId,
+      resolvedSize,
+      currentQuantity + (quantity || 1),
+    );
 
     const spoken = autoSelected
       ? `I added ${product.name} in size ${resolvedSize} to your cart, since any size works for you.`
@@ -1182,17 +1285,22 @@ export default function AIAssistant() {
       return spoken;
     }
 
-    const defaultAddress = addresses.find((item) => item.isDefault) || addresses[0];
+    const defaultAddress =
+      addresses.find((item) => item.isDefault) || addresses[0];
 
     if (!defaultAddress) {
-      const spoken = "You do not have a saved address yet. Let's go to checkout so you can add one.";
+      const spoken =
+        "You do not have a saved address yet. Let's go to checkout so you can add one.";
       setAiReply(spoken);
       speakText(spoken);
       navigate("/place-order");
       return spoken;
     }
 
-    const subtotal = orderItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    const subtotal = orderItems.reduce(
+      (sum, item) => sum + item.price * item.quantity,
+      0,
+    );
     const amount = subtotal + delivery_fee;
     const itemCount = orderItems.reduce((sum, item) => sum + item.quantity, 0);
 
@@ -1221,14 +1329,17 @@ export default function AIAssistant() {
             return spoken;
           }
 
-          const spoken = response.message || "I could not place your order. Please try again from checkout.";
+          const spoken =
+            response.message ||
+            "I could not place your order. Please try again from checkout.";
           setCurrentAction("Order placement failed");
           setAiReply(spoken);
           speakText(spoken);
           return spoken;
         } catch (error) {
           console.error("Voice place order error:", error);
-          const spoken = "Something went wrong placing your order. Please try again from checkout.";
+          const spoken =
+            "Something went wrong placing your order. Please try again from checkout.";
           setAiReply(spoken);
           speakText(spoken);
           return spoken;
@@ -1248,10 +1359,13 @@ export default function AIAssistant() {
   // unchanged regardless of what this client-side pre-check found.
   const beginCancelOrder = (orderId) => {
     const cancellableStatuses = ["Order Placed", "Packing"];
-    const order = orders.find((item) => item._id === orderId) || (orders.length === 1 ? orders[0] : null);
+    const order =
+      orders.find((item) => item._id === orderId) ||
+      (orders.length === 1 ? orders[0] : null);
 
     if (!order) {
-      const spoken = "I could not find that order. Please check your orders page.";
+      const spoken =
+        "I could not find that order. Please check your orders page.";
       setAiReply(spoken);
       speakText(spoken);
       return spoken;
@@ -1273,19 +1387,27 @@ export default function AIAssistant() {
       declineMessage: "Okay, I won't cancel that order.",
       onConfirm: async () => {
         try {
-          const response = await cancelOrder(order._id, "Cancelled by customer", "assistant");
+          const response = await cancelOrder(
+            order._id,
+            "Cancelled by customer",
+            "assistant",
+          );
 
           const spoken = response.success
-            ? (response.message || "Your order has been cancelled.")
-            : (response.message || "I could not cancel that order. Please try again from your orders page.");
+            ? response.message || "Your order has been cancelled."
+            : response.message ||
+              "I could not cancel that order. Please try again from your orders page.";
 
-          setCurrentAction(response.success ? "Order cancelled" : "Cancel failed");
+          setCurrentAction(
+            response.success ? "Order cancelled" : "Cancel failed",
+          );
           setAiReply(spoken);
           speakText(spoken);
           return spoken;
         } catch (error) {
           console.error("Voice cancel order error:", error);
-          const spoken = "Something went wrong cancelling your order. Please try again from your orders page.";
+          const spoken =
+            "Something went wrong cancelling your order. Please try again from your orders page.";
           setAiReply(spoken);
           speakText(spoken);
           return spoken;
@@ -1375,13 +1497,25 @@ export default function AIAssistant() {
 
         if (sortBy === "category") {
           const categoryKeyword = [
-            "men", "women", "kids", "jacket", "hoodie", "sweater", "shirt",
-            "pants", "dress", "saree", "winterwear", "topwear", "bottomwear",
+            "men",
+            "women",
+            "kids",
+            "jacket",
+            "hoodie",
+            "sweater",
+            "shirt",
+            "pants",
+            "dress",
+            "saree",
+            "winterwear",
+            "topwear",
+            "bottomwear",
           ].find((word) => rawText.toLowerCase().includes(word));
 
           if (categoryKeyword) {
             setVoiceCategory(
-              categoryKeyword.charAt(0).toUpperCase() + categoryKeyword.slice(1),
+              categoryKeyword.charAt(0).toUpperCase() +
+                categoryKeyword.slice(1),
             );
           }
 
@@ -1457,11 +1591,21 @@ export default function AIAssistant() {
             return spoken;
           }
 
-          return completeAddToCart(product._id, matchedSize, args.quantity || 1, false);
+          return completeAddToCart(
+            product._id,
+            matchedSize,
+            args.quantity || 1,
+            false,
+          );
         }
 
         if (args.autoSelectSize || availableSizes.length === 0) {
-          return completeAddToCart(product._id, null, args.quantity || 1, Boolean(args.autoSelectSize));
+          return completeAddToCart(
+            product._id,
+            null,
+            args.quantity || 1,
+            Boolean(args.autoSelectSize),
+          );
         }
 
         // Size required but neither given nor auto-select authorized - ask,
@@ -1498,12 +1642,16 @@ export default function AIAssistant() {
           return spoken;
         }
 
-        const targetQuantity = Math.max(0, Math.round(Number(args.quantity) || 0));
+        const targetQuantity = Math.max(
+          0,
+          Math.round(Number(args.quantity) || 0),
+        );
         setCartItemQuantity(product._id, size, targetQuantity);
 
-        const spoken = targetQuantity > 0
-          ? `Updated ${product.name} (size ${size}) to ${targetQuantity}.`
-          : `Removed ${product.name} (size ${size}) from your cart.`;
+        const spoken =
+          targetQuantity > 0
+            ? `Updated ${product.name} (size ${size}) to ${targetQuantity}.`
+            : `Removed ${product.name} (size ${size}) from your cart.`;
 
         setCurrentAction(spoken);
         setAiReply(spoken);
@@ -1532,7 +1680,9 @@ export default function AIAssistant() {
         }
 
         const targetSizes = args.size
-          ? sizesInCart.filter((size) => size.toLowerCase() === args.size.toLowerCase())
+          ? sizesInCart.filter(
+              (size) => size.toLowerCase() === args.size.toLowerCase(),
+            )
           : sizesInCart;
 
         if (targetSizes.length === 0) {
@@ -1542,7 +1692,9 @@ export default function AIAssistant() {
           return spoken;
         }
 
-        targetSizes.forEach((size) => setCartItemQuantity(product._id, size, 0));
+        targetSizes.forEach((size) =>
+          setCartItemQuantity(product._id, size, 0),
+        );
 
         const spoken = `Removed ${product.name}${args.size ? ` (size ${args.size})` : ""} from your cart.`;
         setCurrentAction(spoken);
@@ -1560,7 +1712,9 @@ export default function AIAssistant() {
       case "track_order": {
         const order = args.orderId
           ? orders.find((item) => item._id === args.orderId)
-          : orders.length === 1 ? orders[0] : null;
+          : orders.length === 1
+            ? orders[0]
+            : null;
 
         if (!order) {
           if (!orders.length) {
@@ -1570,7 +1724,8 @@ export default function AIAssistant() {
             return spoken;
           }
 
-          const spoken = "You have multiple orders. Please open your orders page to pick one, or tell me the product it was for.";
+          const spoken =
+            "You have multiple orders. Please open your orders page to pick one, or tell me the product it was for.";
           setAiReply(spoken);
           speakText(spoken);
           navigate("/orders");
@@ -1579,7 +1734,9 @@ export default function AIAssistant() {
 
         navigate(`/track/${order._id}`);
 
-        const itemNames = (order.items || []).map((item) => item.name).join(", ");
+        const itemNames = (order.items || [])
+          .map((item) => item.name)
+          .join(", ");
         const spoken = `Your order (${itemNames}) is currently ${order.status}${order.estimatedDelivery ? `, expected by ${order.estimatedDelivery}` : ""}.`;
         setCurrentAction("Showing order tracking");
         setAiReply(spoken);
@@ -1613,7 +1770,14 @@ export default function AIAssistant() {
       return { tool: "recommend_products", arguments: { query: text } };
     }
 
-    const searchTriggers = ["show me", "find", "search for", "i want", "i need", "looking for"];
+    const searchTriggers = [
+      "show me",
+      "find",
+      "search for",
+      "i want",
+      "i need",
+      "looking for",
+    ];
     if (searchTriggers.some((phrase) => normalized.includes(phrase))) {
       return { tool: "search_products", arguments: extractSearchFilters(text) };
     }
@@ -1688,10 +1852,14 @@ export default function AIAssistant() {
           throw new Error(apiConfigError || "Backend URL is not configured");
         }
 
-        const response = await fetchWithTimeout(`${backendUrl}/api/voice/transcribe`, {
-          method: "POST",
-          body: formData,
-        }, 30000);
+        const response = await fetchWithTimeout(
+          `${backendUrl}/api/voice/transcribe`,
+          {
+            method: "POST",
+            body: formData,
+          },
+          30000,
+        );
 
         const data = await response.json();
 
@@ -1822,7 +1990,10 @@ export default function AIAssistant() {
     let toolCall = null;
 
     try {
-      toolCall = await getAssistantTool(normalizedText, clarificationHistory || []);
+      toolCall = await getAssistantTool(
+        normalizedText,
+        clarificationHistory || [],
+      );
     } catch (error) {
       console.error("AI tool selection error:", error);
       // Offline/network fallback has no UI context to work with, so it
@@ -1834,7 +2005,11 @@ export default function AIAssistant() {
     let assistantResponse = "";
 
     if (toolCall?.tool) {
-      assistantResponse = runTool(toolCall.tool, toolCall.arguments || {}, normalizedText);
+      assistantResponse = runTool(
+        toolCall.tool,
+        toolCall.arguments || {},
+        normalizedText,
+      );
     } else if (toolCall?.reply) {
       // The model had live UI context but couldn't confidently resolve an
       // ambiguous reference (e.g. "open this") - ask the clarifying
@@ -1983,18 +2158,22 @@ export default function AIAssistant() {
         throw new Error(apiConfigError || "Backend URL is not configured");
       }
 
-      const response = await fetchWithTimeout(`${backendUrl}/api/chat`, {
-        method: "POST",
+      const response = await fetchWithTimeout(
+        `${backendUrl}/api/chat`,
+        {
+          method: "POST",
 
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { token } : {}),
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { token } : {}),
+          },
+
+          body: JSON.stringify({
+            message: text,
+          }),
         },
-
-        body: JSON.stringify({
-          message: text,
-        }),
-      }, 20000);
+        20000,
+      );
 
       const data = await response.json();
 
@@ -2038,18 +2217,22 @@ export default function AIAssistant() {
       throw new Error(apiConfigError || "Backend URL is not configured");
     }
 
-    const response = await fetchWithTimeout(`${backendUrl}/api/ai/intent`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
+    const response = await fetchWithTimeout(
+      `${backendUrl}/api/ai/intent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          message: text,
+          uiContext: getUIContext(),
+          history,
+          recentActivity: memoryRef.current.activityLog,
+        }),
       },
-      body: JSON.stringify({
-        message: text,
-        uiContext: getUIContext(),
-        history,
-        recentActivity: memoryRef.current.activityLog,
-      }),
-    }, 15000);
+      15000,
+    );
 
     const data = await response.json();
 
@@ -2219,255 +2402,117 @@ export default function AIAssistant() {
   return (
     <>
       <style>{`
-
-@keyframes pulse{
-
-0%{
-transform:scale(1);
-opacity:.5;
-}
-
-100%{
-transform:scale(1.8);
-opacity:0;
-}
-
-}
-
-
-
-@keyframes orb{
-
-50%{
-transform:scale(1.08);
-}
-
-}
-
-
-
-.idris-ai-container{
-
-position:fixed;
-
-right:12px;
-
-bottom:85px;
-
-z-index:9999;
-
-
-transition:.5s ease;
-
-}
-
-
-
-.idris-ai-container.open{
-
-left:50%;
-
-right:auto;
-
-bottom:70px;
-
-transform:translateX(-50%);
-
-}
-
-
-
-
-.idris-ai-button{
-
-
-width:56px;
-
-height:56px;
-
-border-radius:50%;
-
-border:none;
-
-background:#1a1a1a;
-
-display:flex;
-
-align-items:center;
-
-justify-content:center;
-
-cursor:pointer;
-
-box-shadow:
-0 8px 30px rgba(0,0,0,.3);
-
-
-position:relative;
-z-index:10001;
-
-
-}
-
-
-
-.idris-ai-container.open
-.idris-ai-button{
-
-
-width:74px;
-
-height:74px;
-
-
-}
-
-
-
-.idris-ai-container.listening
-.idris-ai-button{
-
-
-animation:orb 1s infinite;
-
-}
-
-
-
-
-.idris-ai-button::before{
-
-
-content:"";
-
-position:absolute;
-
-inset:0;
-
-border-radius:50%;
-
-background:#b89f8a;
-
-z-index:-1;
-
-animation:pulse 1.5s infinite;
-
-
-}
-
-
-
-
-.idris-ai-orb{
-
-
-width:35px;
-
-height:35px;
-
-border-radius:50%;
-
-
-background:
-radial-gradient(
-circle at 30% 30%,
-white,
-#b89f8a,
-#1a1a1a
-);
-
-
-
-}
-
-
-
-.idris-ai-box{
-
-  position:absolute;
-
-  bottom:80px;
-
-  left:50%;
-
-  transform:translateX(-50%);
-
-  width:min(350px,85vw);
-
-  display:flex;
-
-  flex-direction:column;
-
-  gap:8px;
-  pointer-events:none;
+@keyframes pulse {
+  0% {
+    transform: scale(1);
+    opacity: .5;
   }
-
-
-
-
-
-
-.idris-ai-message{
-
-
-background:white;
-
-border:1px solid #e8e0d8;
-
-padding:12px 15px;
-
-border-radius:12px;
-
-font-family:Outfit;
-
-font-size:13px;
-
-text-align:center;
-
-
-box-shadow:
-0 10px 30px rgba(0,0,0,.12);
-
-
+  100% {
+    transform: scale(1.8);
+    opacity: 0;
+  }
 }
 
-
-
-.idris-ai-status{
-
-
-background:#1a1a1a;
-
-color:white;
-
-padding:7px 14px;
-
-border-radius:20px;
-
-font-size:12px;
-
-margin:auto;
-
-font-family:Outfit;
-
-
+@keyframes orb {
+  50% {
+    transform: scale(1.08);
+  }
 }
 
-
-
-@media(max-width:480px){
-
-
-.idris-ai-container.open{
-
-bottom:20px;
-
+.idris-ai-container {
+  position: fixed;
+  right: 12px;
+  bottom: 85px;
+  z-index: 9999;
+  transition: .5s ease;
 }
 
-
-
+.idris-ai-container.open {
+  left: 50%;
+  right: auto;
+  bottom: 70px;
+  transform: translateX(-50%);
 }
 
+.idris-ai-button {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: none;
+  background: #1a1a1a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 8px 30px rgba(0,0,0,.3);
+  position: relative;
+  z-index: 10001;
+}
+
+.idris-ai-container.open .idris-ai-button {
+  width: 74px;
+  height: 74px;
+}
+
+.idris-ai-container.listening .idris-ai-button {
+  animation: orb 1s infinite;
+}
+
+.idris-ai-button::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #b89f8a;
+  z-index: -1;
+  animation: pulse 1.5s infinite;
+}
+
+.idris-ai-orb {
+  width: 35px;
+  height: 35px;
+  border-radius: 50%;
+  background: radial-gradient( circle at 30% 30%, white, #b89f8a, #1a1a1a );
+}
+
+.idris-ai-box {
+  position: absolute;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(350px,85vw);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.idris-ai-message {
+  background: white;
+  border: 1px solid #e8e0d8;
+  padding: 12px 15px;
+  border-radius: 12px;
+  font-family: Outfit;
+  font-size: 13px;
+  text-align: center;
+  box-shadow: 0 10px 30px rgba(0,0,0,.12);
+}
+
+.idris-ai-status {
+  background: #1a1a1a;
+  color: white;
+  padding: 7px 14px;
+  border-radius: 20px;
+  font-size: 12px;
+  margin: auto;
+  font-family: Outfit;
+}
+
+@media(max-width:480px) {
+  .idris-ai-container.open {
+    bottom: 20px;
+  }
+}
 `}</style>
 
       <div className={`idris-ai-container ${open ? "open" : ""}`}>
