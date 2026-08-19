@@ -31,7 +31,11 @@ const ShopContextProvider = (props) => {
   // (via search or recommendation), so the Collection page can display
   // precisely what was announced instead of re-deriving an approximation,
   // and so the assistant can accurately answer "the second one" next turn.
-  const [voiceProductIds, setVoiceProductIds] = useState([]);
+  // null = the assistant hasn't set anything (fall through to manual
+  // filters/search); [] is a deliberate, distinct value meaning "the
+  // assistant searched and found nothing" - collapsing the two would make
+  // a genuine zero-result search silently fall back to showing everything.
+  const [voiceProductIds, setVoiceProductIds] = useState(null);
   const [user, setUser] = useState(null);
   const [orders, setOrders] = useState([]);
   const [addresses, setAddresses] = useState([]);

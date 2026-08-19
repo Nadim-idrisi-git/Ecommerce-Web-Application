@@ -473,18 +473,11 @@ function ChatWindow({ onClose }) {
 
 export default function ChatWidget() {
   const [open, setOpen] = useState(false);
-  const [pulse, setPulse] = useState(true);
-
-  useEffect(() => {
-    const t = setTimeout(() => setPulse(false), 3500);
-    return () => clearTimeout(t);
-  }, []);
 
   return (
     <>
       <style>{`
         @keyframes bounce { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-5px)} }
-        @keyframes pulseRing { 0%{transform:scale(1);opacity:0.5} 100%{transform:scale(1.65);opacity:0} }
         @keyframes slideUp { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:translateY(0)} }
       `}</style>
 
@@ -501,17 +494,6 @@ export default function ChatWidget() {
         )}
 
         <div style={{ position: "relative" }}>
-          {pulse && !open && (
-            <span
-              style={{
-                position: "absolute",
-                inset: 0,
-                borderRadius: "50%",
-                background: "#1a1a1a",
-                animation: "pulseRing 1.6s ease-out infinite",
-              }}
-            />
-          )}
           <button
             onClick={() => setOpen((o) => !o)}
             style={{

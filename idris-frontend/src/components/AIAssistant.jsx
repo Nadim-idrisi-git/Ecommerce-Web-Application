@@ -51,6 +51,80 @@ const summarizeProductForContext = (product) => ({
   bestseller: Boolean(product.bestseller),
 });
 
+// Word-boundary matched so e.g. "men" never also matches inside "women"
+// (wo-MEN) - a plain .includes("men") check would.
+//
+// Gender/section and garment type are two independent facets a request can
+// name together ("winter jackets for men") or across turns ("men" then,
+// separately, "winter") - kept as separate detectors (not one
+// first-match-wins list) so both can be resolved from the same utterance,
+// and so the gender half specifically can be remembered/reapplied on a
+// later turn that only supplies the other one.
+const GENDER_TERM_PATTERNS = [
+  { value: "women", pattern: /\bwomen'?s?\b/i },
+  { value: "men", pattern: /\bmen'?s?\b/i },
+  { value: "kids", pattern: /\bkids?\b/i },
+];
+
+const GARMENT_TERM_PATTERNS = [
+  { value: "jacket", pattern: /\bjackets?\b/i },
+  { value: "hoodie", pattern: /\bhoodies?\b/i },
+  { value: "sweater", pattern: /\bsweaters?\b/i },
+  { value: "t-shirt", pattern: /\bt-?shirts?\b|\btees?\b/i },
+  { value: "shirt", pattern: /\bshirts?\b|\btopwear\b/i },
+  { value: "pant", pattern: /\bpants?\b|\btrousers?\b|\bbottomwear\b/i },
+  { value: "dress", pattern: /\bdresses?\b/i },
+  { value: "saree", pattern: /\bsarees?\b/i },
+];
+
+const detectGenderSection = (text) => {
+  const hit = GENDER_TERM_PATTERNS.find(({ pattern }) => pattern.test(text));
+  return hit ? hit.value : "";
+};
+
+const detectGarmentCategory = (text) => {
+  const hit = GARMENT_TERM_PATTERNS.find(({ pattern }) => pattern.test(text));
+  return hit ? hit.value : "";
+};
+
+// Single-slot combined lookup (gender takes priority) for callers that only
+// have room for one category value, e.g. the offline local-fallback search.
+const detectCategoryFromText = (text) =>
+  detectGenderSection(text) || detectGarmentCategory(text);
+
+// "Add the most expensive one to my cart" names a product by superlative,
+// not by name - findProductByQuery (name matching only) can't resolve that,
+// and used to leave the assistant with nothing to act on, so it fell back
+// to dumping the whole raw sentence into the plain-text catalog search box.
+// Resolved locally against the full catalog (already loaded client-side),
+// no extra round trip needed.
+const SUPERLATIVE_PATTERNS = [
+  {
+    pattern:
+      /\b(most|highest|maximum)\s+(expensive|priced?|costly)\b|\bcostliest\b|\bpriciest\b/i,
+    pick: (list) => [...list].sort((a, b) => b.price - a.price)[0],
+  },
+  {
+    pattern: /\b(least|lowest|minimum)\s+(expensive|priced?)\b|\bcheapest\b/i,
+    pick: (list) => [...list].sort((a, b) => a.price - b.price)[0],
+  },
+  {
+    pattern: /\bnewest\b|\blatest\b|\bmost recent\b|\bnew arrival\b/i,
+    pick: (list) => [...list].sort((a, b) => b.date - a.date)[0],
+  },
+  {
+    pattern: /\bbestseller\b|\bbest seller\b|\bmost popular\b|\btop selling\b/i,
+    pick: (list) => list.find((product) => product.bestseller),
+  },
+];
+
+const resolveSuperlativeProduct = (text, productList) => {
+  const hit = SUPERLATIVE_PATTERNS.find(({ pattern }) =>
+    pattern.test(text || ""),
+  );
+  return (hit && hit.pick(productList)) || null;
+};
+
 // Every action the assistant can take lives here. The backend (/api/ai/intent)
 // declares the exact same tool names/schemas to Gemini's function calling, so
 // the model can only ever pick from this allowlist - it cannot invent a tool.
@@ -172,6 +246,35 @@ const DESTRUCTIVE_PHRASES = [
   "db update",
 ];
 
+const ORBIT_DOTS = Array.from({ length: 12 }, (_, i) => i);
+
+const SparkleIcon = () => (
+  <svg viewBox="0 0 24 24" width="100%" height="100%" fill="none">
+    <path
+      d="M12 2 L14.2 9.3 L21.5 12 L14.2 14.7 L12 22 L9.8 14.7 L2.5 12 L9.8 9.3 Z"
+      fill="currentColor"
+    />
+  </svg>
+);
+
+const MicIcon = () => (
+  <svg
+    viewBox="0 0 24 24"
+    width="100%"
+    height="100%"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <rect x="9" y="2" width="6" height="12" rx="3" />
+    <path d="M5 10a7 7 0 0 0 14 0" />
+    <line x1="12" y1="17" x2="12" y2="21" />
+    <line x1="8" y1="21" x2="16" y2="21" />
+  </svg>
+);
+
 export default function AIAssistant() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -204,6 +307,10 @@ export default function AIAssistant() {
     ? `Hi ${firstName}, how can I assist you?`
     : "How can I assist you?";
   const [open, setOpen] = useState(false);
+  // Bumped on every open so a fresh <span key={rippleSeq}> mounts and its
+  // one-shot CSS animation restarts (a re-render with the same key would
+  // never replay a completed "forwards"-filled animation).
+  const [rippleSeq, setRippleSeq] = useState(0);
   const [status, setStatus] = useState(() => {
     const hasMediaDevices =
       navigator.mediaDevices &&
@@ -231,6 +338,17 @@ export default function AIAssistant() {
   // its own lightweight mic-level watcher.
   const vadCleanupRef = useRef(null);
   const recognitionRef = useRef(null);
+  // ensureRecognition() builds the SpeechRecognition object once and caches
+  // it in recognitionRef for the rest of the session - its callbacks are
+  // therefore permanently bound to whatever render happened to be active
+  // the first time it ran, so a direct call to processVoiceText from inside
+  // them would forever see that render's cartItems/products/location/etc,
+  // not the current ones (e.g. items added to the cart, or a navigation to
+  // checkout, after that first session would be invisible to it). Routing
+  // through this ref - kept pointed at the latest render's processVoiceText
+  // by the effect below - keeps every voice command working off current
+  // state no matter how long the recognition session has been running.
+  const processVoiceTextRef = useRef(null);
   const pauseTimerRef = useRef(null);
   const listeningSessionRef = useRef(false);
   const hadSpeechRef = useRef(false);
@@ -252,6 +370,13 @@ export default function AIAssistant() {
   const liveGenerationRef = useRef(0);
   const memoryRef = useRef({
     lastCategory: "",
+    // Separate from lastCategory (which is whatever single value the last
+    // search/recommendation used, gender or garment type or section) -
+    // this specifically tracks men/women/kids so a later request that only
+    // gives an occasion or garment type ("winter", "a jacket") stays scoped
+    // to the audience the customer already told the assistant, instead of
+    // searching across all three sections again.
+    lastGenderCategory: "",
     lastColor: "",
     lastQuery: "",
     lastRecommendationQuery: "",
@@ -506,6 +631,10 @@ export default function AIAssistant() {
       !window.speechSynthesis ||
       typeof SpeechSynthesisUtterance === "undefined"
     ) {
+      // speakText() already optimistically flipped isSpeaking true - if
+      // there's no voice backend to actually pick it up, undo that so the
+      // UI doesn't get stuck showing "Speaking" forever.
+      setIsSpeaking(false);
       return;
     }
 
@@ -581,6 +710,11 @@ export default function AIAssistant() {
 
     stopSpeaking();
     const generation = liveGenerationRef.current;
+    // Flip immediately rather than waiting for the first streamed audio
+    // chunk (~1.2-1.6s away) - otherwise the UI sits in the idle state for
+    // that entire window even though the assistant has already committed
+    // to speaking.
+    setIsSpeaking(true);
 
     const speechLang = detectSpeechLang(text);
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -743,21 +877,6 @@ export default function AIAssistant() {
       maxPrice: "",
     };
 
-    const categoryMap = [
-      { value: "jacket", terms: ["jacket", "jackets"] },
-      { value: "hoodie", terms: ["hoodie", "hoodies"] },
-      { value: "sweater", terms: ["sweater", "sweaters"] },
-      { value: "shirt", terms: ["shirt", "shirts", "topwear"] },
-      { value: "t-shirt", terms: ["t-shirt", "tee", "tees"] },
-      {
-        value: "pant",
-        terms: ["pant", "pants", "trouser", "trousers", "bottomwear"],
-      },
-      { value: "dress", terms: ["dress", "dresses"] },
-      { value: "saree", terms: ["saree", "sarees"] },
-      { value: "kids", terms: ["kids", "kid"] },
-    ];
-
     const colorMap = [
       "black",
       "white",
@@ -775,13 +894,7 @@ export default function AIAssistant() {
       "olive",
     ];
 
-    const categoryHit = categoryMap.find(({ terms }) =>
-      terms.some((term) => normalized.includes(term)),
-    );
-
-    if (categoryHit) {
-      filters.category = categoryHit.value;
-    }
+    filters.category = detectCategoryFromText(normalized);
 
     const colorHit = colorMap.find((color) => normalized.includes(color));
     if (colorHit) {
@@ -836,10 +949,10 @@ export default function AIAssistant() {
     return keywords;
   };
 
-  const scoreRecommendations = (keywords) => {
+  const scoreRecommendations = (keywords, productList = products) => {
     if (!keywords.length) return [];
 
-    const scored = products.map((product) => {
+    const scored = productList.map((product) => {
       const haystack = [
         product.name,
         product.category,
@@ -1016,7 +1129,7 @@ export default function AIAssistant() {
   // selections made by clicking (not by voice) aren't reflected here, since
   // that state lives locally inside the Collection component.
   const getVisibleCollectionProducts = () => {
-    if (voiceProductIds?.length) {
+    if (voiceProductIds !== null) {
       const byId = new Map(products.map((product) => [product._id, product]));
       return voiceProductIds.map((id) => byId.get(id)).filter(Boolean);
     }
@@ -1179,20 +1292,133 @@ export default function AIAssistant() {
     return null;
   };
 
-  // Finds the product a cart/order-adjacent tool call is referring to,
-  // preferring a resolved id from context over a fuzzy name search.
-  const resolveProductFromArgs = (args, rawText) =>
-    (args.productId &&
-      products.find((product) => product._id === args.productId)) ||
-    findProductByQuery(args.query || rawText);
+  // Finds the product a cart/order-adjacent tool call is referring to:
+  // a resolved id from context first, then a superlative reference
+  // ("the most expensive one"), then a fuzzy name match.
+  const resolveProductFromArgs = (args, rawText) => {
+    if (args.productId) {
+      const byId = products.find((product) => product._id === args.productId);
+      if (byId) return byId;
+    }
+
+    const text = args.query || rawText;
+    return (
+      resolveSuperlativeProduct(text, products) || findProductByQuery(text)
+    );
+  };
+
+  // Central place a recommendation/browse result gets spoken and pushed to
+  // the collection page - shared by the audience/garment browse branch and
+  // the (rare, now-audience-scoped) zero-signal path so both stay in sync
+  // with how search_products reports itself.
+  const respondWithProducts = (matchingProducts, filters, descriptor) => {
+    setVoiceSearchFilters({
+      query: filters.query || "",
+      category: filters.category || "",
+      color: filters.color || "",
+      maxPrice: filters.maxPrice || null,
+    });
+    setVoiceProductIds(matchingProducts.map((product) => product._id));
+    setSearch("");
+    setShowSearch(false);
+    navigate("/collection");
+
+    const spoken =
+      matchingProducts.length > 0
+        ? `${firstName ? `Sure, ${firstName}. ` : ""}Here are ${matchingProducts.length} products${descriptor ? ` for ${descriptor}` : ""}.`
+        : `I could not find any products${descriptor ? ` for ${descriptor}` : ""}.`;
+
+    setCurrentAction(
+      matchingProducts.length > 0
+        ? `Showing ${matchingProducts.length} products${descriptor ? ` for ${descriptor}` : ""}`
+        : "No matching products found",
+    );
+    setAiReply(spoken);
+    rememberSearchContext(
+      filters,
+      matchingProducts,
+      descriptor || filters.query,
+    );
+    speakText(spoken);
+    return spoken;
+  };
 
   const handleRecommendationQuery = (text) => {
-    const keywords = getRecommendationKeywords(text);
-    const picks = scoreRecommendations(keywords);
+    const explicitGender = detectGenderSection(text);
+    const garmentCategory = detectGarmentCategory(text);
+    const occasionKeywords = getRecommendationKeywords(text);
+
+    // A gender word in THIS utterance always wins and is remembered for
+    // later turns; otherwise fall back to whichever audience the customer
+    // already told the assistant this session, so "winter" on its own
+    // after "men" stays scoped to men instead of searching all sections.
+    const resolvedGender =
+      explicitGender || memoryRef.current.lastGenderCategory || "";
+    if (explicitGender) {
+      memoryRef.current = {
+        ...memoryRef.current,
+        lastGenderCategory: explicitGender,
+      };
+    }
+
+    // No known audience - a recommendation is inherently personal, so even
+    // "suggest a warm jacket" (garment + occasion, but no one named) should
+    // ask who it's for rather than mixing men's/women's/kids' results
+    // together. (search_products, a direct "show me jackets" lookup, is
+    // intentionally not gated this way - see that case's own comment.)
+    // Ask, and remember the original request so it can be combined with
+    // the audience once we have one.
+    if (!resolvedGender) {
+      const question = "Sure - who are these for: men, women, or kids?";
+      setCurrentAction("Awaiting recommendation audience");
+      setAiReply(question);
+      speakText(question);
+      pendingActionRef.current = {
+        type: "recommendation_clarify",
+        originalText: text,
+      };
+      return question;
+    }
+
+    const genderScopedProducts = resolvedGender
+      ? products.filter(
+          (product) =>
+            (product.category || "").toLowerCase() === resolvedGender,
+        )
+      : products;
+
+    const audienceLabel = resolvedGender
+      ? resolvedGender.charAt(0).toUpperCase() + resolvedGender.slice(1)
+      : "";
+    const describeFor = (secondary) =>
+      audienceLabel
+        ? `${audienceLabel}'s${secondary ? ` ${secondary}` : ""}`
+        : secondary || "";
+
+    // A garment type ("a jacket") or a bare audience ("men", nothing else)
+    // is a browse - show every match, the same as search_products, rather
+    // than a curated handful.
+    if (garmentCategory || !occasionKeywords.length) {
+      const filters = {
+        query: "",
+        category: garmentCategory || resolvedGender,
+        color: "",
+        maxPrice: "",
+      };
+      const matchingProducts = searchProducts(genderScopedProducts, filters);
+      const descriptor = describeFor(garmentCategory);
+      return respondWithProducts(matchingProducts, filters, descriptor);
+    }
+
+    // An occasion ("winter", "office", "party"...) - curated top picks,
+    // scoped to the resolved audience.
+    const picks = scoreRecommendations(occasionKeywords, genderScopedProducts);
+    const descriptor = describeFor(occasionKeywords[0]);
+
     const responseText =
       picks.length > 0
-        ? `${firstName ? `Sure, ${firstName}. ` : ""}I recommend ${picks.map((item) => item.name).join(", ")}.`
-        : "I could not find a strong recommendation, so I opened the catalog.";
+        ? `${firstName ? `Sure, ${firstName}. ` : ""}I recommend ${picks.map((item) => item.name).join(", ")}${descriptor ? ` for ${descriptor}` : ""}.`
+        : `I could not find a strong recommendation${descriptor ? ` for ${descriptor}` : ""}.`;
 
     setCurrentAction(
       picks.length > 0
@@ -1452,6 +1678,40 @@ export default function AIAssistant() {
       }
 
       case "search_products": {
+        // Same audience memory as recommend_products (see
+        // handleRecommendationQuery) - a follow-up like "now show jackets"
+        // with no gender word of its own should stay scoped to whichever
+        // audience the customer already named this session, not search
+        // across men/women/kids again. Unlike recommend_products, this
+        // doesn't ask when no audience is known at all - "search for
+        // jackets" is a direct catalog lookup (like typing in the search
+        // box), not a personal recommendation, so it's fine to search
+        // every section by default.
+        const rawCategory = (args.category || "").toLowerCase();
+        const isGenderArg =
+          rawCategory === "men" ||
+          rawCategory === "women" ||
+          rawCategory === "kids";
+        const explicitGender = isGenderArg
+          ? rawCategory
+          : detectGenderSection(rawText);
+        const resolvedGender =
+          explicitGender || memoryRef.current.lastGenderCategory || "";
+
+        if (explicitGender) {
+          memoryRef.current = {
+            ...memoryRef.current,
+            lastGenderCategory: explicitGender,
+          };
+        }
+
+        const genderScopedProducts = resolvedGender
+          ? products.filter(
+              (product) =>
+                (product.category || "").toLowerCase() === resolvedGender,
+            )
+          : products;
+
         const filters = {
           query: args.query || rawText,
           category: args.category || "",
@@ -1459,7 +1719,7 @@ export default function AIAssistant() {
           maxPrice: args.maxPrice ?? "",
         };
 
-        const matchingProducts = searchProducts(products, filters);
+        const matchingProducts = searchProducts(genderScopedProducts, filters);
 
         setVoiceSearchFilters({
           query: filters.query,
@@ -1468,8 +1728,12 @@ export default function AIAssistant() {
           maxPrice: filters.maxPrice || null,
         });
         setVoiceProductIds(matchingProducts.map((product) => product._id));
-        setSearch(filters.query);
-        setShowSearch(true);
+        // The results are already filtered via voiceProductIds above -
+        // don't also surface the raw spoken sentence in the visible search
+        // input (e.g. "show me black jacket" verbatim). Matches how
+        // handleRecommendationQuery/respondWithProducts already behave.
+        setSearch("");
+        setShowSearch(false);
         navigate("/collection");
 
         const spoken =
@@ -1490,7 +1754,12 @@ export default function AIAssistant() {
       }
 
       case "recommend_products":
-        return handleRecommendationQuery(args.query || rawText);
+        // rawText (the customer's literal words), not args.query - Gemini's
+        // query is paraphrased toward "occasion/use-case" per its schema
+        // description and can drop words like "men" entirely, which the
+        // gender/garment detectors inside handleRecommendationQuery need
+        // to see verbatim.
+        return handleRecommendationQuery(rawText);
 
       case "sort_products": {
         const sortBy = args.sortBy || "relevant";
@@ -1794,6 +2063,15 @@ export default function AIAssistant() {
       },
     });
 
+    // The assistant may have been closed while getUserMedia was still
+    // resolving (stopRecording runs before the mic stream exists, so it has
+    // nothing to stop). Without this check the stream below would go live
+    // with no one left to stop it, leaving the mic indicator stuck on.
+    if (!listeningSessionRef.current) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+
     mediaStreamRef.current = stream;
     vadCleanupRef.current?.();
     vadCleanupRef.current = startVoiceActivityMonitor(stream);
@@ -1867,7 +2145,9 @@ export default function AIAssistant() {
           throw new Error(data.message);
         }
 
-        assistantResponse = await processVoiceText(data.transcript.trim());
+        assistantResponse = await processVoiceTextRef.current(
+          data.transcript.trim(),
+        );
         if (!assistantResponse) {
           assistantResponse = "";
         }
@@ -1937,6 +2217,37 @@ export default function AIAssistant() {
 
         // Didn't parse as a size answer - drop the pending state and fall
         // through to treat this as a new, unrelated utterance.
+      } else if (pending.type === "recommendation_clarify") {
+        const gender = detectGenderSection(normalizedText);
+
+        if (gender) {
+          pendingActionRef.current = null;
+          // Combine the answer with the original ask so any occasion/
+          // garment type already mentioned ("suggest something warm") is
+          // still honored now that the audience is known too.
+          const spoken = handleRecommendationQuery(
+            `${pending.originalText} ${normalizedText}`.trim(),
+          );
+          pushHistory("assistant", spoken);
+          return spoken;
+        }
+
+        if (
+          /\b(cancel|never\s?mind|forget it|stop|no thanks)\b/i.test(
+            normalizedText,
+          )
+        ) {
+          pendingActionRef.current = null;
+          const spoken = "Okay, no problem.";
+          setAiReply(spoken);
+          speakText(spoken);
+          pushHistory("assistant", spoken);
+          return spoken;
+        }
+
+        // Didn't answer the audience question - drop the pending state and
+        // fall through to treat this as a new, unrelated utterance.
+        pendingActionRef.current = null;
       } else if (pending.type === "confirm" && !isProcessingActionRef.current) {
         const answer = parseYesNo(normalizedText);
 
@@ -2042,6 +2353,10 @@ export default function AIAssistant() {
     return assistantResponse;
   };
 
+  useEffect(() => {
+    processVoiceTextRef.current = processVoiceText;
+  });
+
   const ensureRecognition = () => {
     if (isBraveBrowser()) return null;
 
@@ -2100,7 +2415,7 @@ export default function AIAssistant() {
       }
 
       if (finalText.trim()) {
-        processVoiceText(finalText.trim());
+        processVoiceTextRef.current(finalText.trim());
       }
     };
 
@@ -2274,12 +2589,12 @@ export default function AIAssistant() {
       setAiReply("");
 
       setStatus("requesting-mic");
+      listeningSessionRef.current = true;
 
       const recognition =
         voiceModeRef.current === "recognition" ? ensureRecognition() : null;
 
       if (recognition) {
-        listeningSessionRef.current = true;
         setStatus("listening");
         speakText(greetingLine);
         try {
@@ -2334,6 +2649,7 @@ export default function AIAssistant() {
   const handleAssistantClick = () => {
     if (!open) {
       setOpen(true);
+      setRippleSeq((seq) => seq + 1);
 
       setTimeout(() => {
         startRecording();
@@ -2366,6 +2682,13 @@ export default function AIAssistant() {
   };
 
   const getStatusText = () => {
+    // isSpeaking is the actual source of truth for whether audio is
+    // playing - `status` is never itself set to "speaking" (voice replies
+    // are fired without awaiting so they don't block the status machine),
+    // so without this check the status text falls through to its default
+    // ("Ready to talk") for the entire duration of every spoken reply.
+    if (isSpeaking) return "Speaking";
+
     switch (status) {
       case "requesting-mic":
         return "Requesting microphone";
@@ -2399,23 +2722,65 @@ export default function AIAssistant() {
     }
   };
 
+  const uiState = !open
+    ? "default"
+    : isSpeaking || status === "speaking"
+      ? "speaking"
+      : status === "listening" || status === "requesting-mic"
+        ? "listening"
+        : status === "thinking" || status === "transcribing"
+          ? "thinking"
+          : "idle";
+
   return (
     <>
       <style>{`
-@keyframes pulse {
+@keyframes idris-halo {
   0% {
+    opacity: .55;
     transform: scale(1);
-    opacity: .5;
   }
   100% {
-    transform: scale(1.8);
     opacity: 0;
+    transform: scale(1.55);
   }
 }
 
-@keyframes orb {
+@keyframes idris-breathe {
+  0%,
+  100% {
+    transform: translateZ(0) scale(1);
+  }
   50% {
-    transform: scale(1.08);
+    transform: translateZ(0) scale(1.06);
+  }
+}
+
+@keyframes idris-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes idris-wave-bar {
+  0%,
+  100% {
+    transform: scaleY(.4);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+@media(prefers-reduced-motion:reduce) {
+  .idris-ai-button,
+  .idris-ai-button * {
+    animation-duration: .001ms!important;
+    animation-iteration-count: 1!important;
+    transition-duration: .001ms!important;
   }
 }
 
@@ -2435,18 +2800,36 @@ export default function AIAssistant() {
 }
 
 .idris-ai-button {
+  --idris-ease: cubic-bezier(.22,1,.36,1);
+  --idris-t-fast: 160ms;
+  --idris-t-med: 300ms;
+  --ring-color: 255,255,255;
+  --ring-alpha: .18;
+  --glow-alpha: .14;
   width: 56px;
   height: 56px;
   border-radius: 50%;
   border: none;
-  background: #1a1a1a;
+  background: radial-gradient(circle at 32% 28%,#3c3c3c,#161616 55%,#000 100%);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  box-shadow: 0 8px 30px rgba(0,0,0,.3);
   position: relative;
   z-index: 10001;
+  -webkit-tap-highlight-color: transparent;
+  box-shadow: 0 8px 24px rgba(0,0,0,.35), inset 0 1px 1px rgba(255,255,255,.22), inset 0 -6px 10px rgba(0,0,0,.5), 0 0 0 1px rgba(var(--ring-color),var(--ring-alpha)), 0 0 18px 2px rgba(var(--ring-color),var(--glow-alpha));
+  transform: translateZ(0);
+  transition: box-shadow var(--idris-t-med) var(--idris-ease), width var(--idris-t-med) var(--idris-ease), height var(--idris-t-med) var(--idris-ease), transform var(--idris-t-fast) var(--idris-ease);
+}
+
+.idris-ai-button:focus-visible {
+  outline: 2px solid rgba(255,255,255,.85);
+  outline-offset: 3px;
+}
+
+.idris-ai-button:not(.idris-state-listening):active {
+  transform: translateZ(0) scale(.93);
 }
 
 .idris-ai-container.open .idris-ai-button {
@@ -2454,25 +2837,233 @@ export default function AIAssistant() {
   height: 74px;
 }
 
-.idris-ai-container.listening .idris-ai-button {
-  animation: orb 1s infinite;
+.idris-ai-container:not(.open) .idris-ai-button:hover {
+  --ring-alpha: .45;
+  --glow-alpha: .32;
 }
 
 .idris-ai-button::before {
   content: "";
   position: absolute;
-  inset: 0;
+  inset: -6px;
   border-radius: 50%;
-  background: #b89f8a;
-  z-index: -1;
-  animation: pulse 1.5s infinite;
+  border: 1.5px solid rgba(255,255,255,.6);
+  opacity: 0;
+  pointer-events: none;
 }
 
-.idris-ai-orb {
-  width: 35px;
-  height: 35px;
+.idris-ai-container:not(.open) .idris-ai-button:hover::before {
+  animation: idris-halo 1.6s ease-out infinite;
+}
+
+.idris-ring-dashed {
+  position: absolute;
+  inset: -10px;
   border-radius: 50%;
-  background: radial-gradient( circle at 30% 30%, white, #b89f8a, #1a1a1a );
+  border: 2px dashed rgba(94,234,212,.65);
+  opacity: 0;
+  pointer-events: none;
+  will-change: transform;
+  animation: idris-spin 6s linear infinite;
+  animation-play-state: paused;
+  transition: opacity var(--idris-t-med) var(--idris-ease);
+}
+
+.idris-ai-button.idris-state-listening .idris-ring-dashed {
+  opacity: 1;
+  animation-play-state: running;
+}
+
+.idris-orbit {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  will-change: transform;
+  animation: idris-spin 3s linear infinite;
+  animation-play-state: paused;
+  transition: opacity var(--idris-t-med) var(--idris-ease);
+}
+
+.idris-ai-button.idris-state-thinking .idris-orbit {
+  opacity: 1;
+  animation-play-state: running;
+}
+
+.idris-orbit-dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #a78bfa;
+  box-shadow: 0 0 4px rgba(167,139,250,.8);
+  transform: translate(-50%,-50%) rotate(calc(var(--i) * 30deg)) translateY(-44px);
+}
+
+.idris-ai-button.idris-state-listening {
+  --ring-color: 45,212,218;
+  --ring-alpha: .6;
+  --glow-alpha: .42;
+  animation: idris-breathe 1.6s var(--idris-ease) infinite;
+}
+
+.idris-ai-button.idris-state-thinking {
+  --ring-color: 167,139,250;
+  --ring-alpha: .55;
+  --glow-alpha: .38;
+}
+
+.idris-ai-button.idris-state-speaking {
+  --ring-color: 96,165,250;
+  --ring-alpha: .6;
+  --glow-alpha: .42;
+}
+
+.idris-ai-icon {
+  width: 22px;
+  height: 22px;
+  position: relative;
+  z-index: 2;
+  transition: width var(--idris-t-med) var(--idris-ease),height var(--idris-t-med) var(--idris-ease);
+}
+
+.idris-ai-container.open .idris-ai-icon {
+  width: 26px;
+  height: 26px;
+}
+
+.idris-icon-layer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  opacity: 0;
+  transform: scale(.85);
+  transition: opacity var(--idris-t-med) var(--idris-ease),transform var(--idris-t-med) var(--idris-ease);
+}
+
+.idris-ai-button.idris-state-default .idris-icon-sparkle,
+.idris-ai-button.idris-state-idle .idris-icon-sparkle,
+.idris-ai-button.idris-state-thinking .idris-icon-sparkle {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.idris-ai-button.idris-state-listening .idris-icon-mic {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.idris-ai-button.idris-state-speaking .idris-icon-wave {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.idris-ai-close {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 22px;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--idris-t-fast) var(--idris-ease);
+  z-index: 3;
+}
+
+.idris-ai-container.open .idris-ai-button:hover .idris-ai-close {
+  opacity: 1;
+}
+
+.idris-ai-container.open .idris-ai-button:hover .idris-ai-icon,
+.idris-ai-container.open .idris-ai-button:hover .idris-orbit,
+.idris-ai-container.open .idris-ai-button:hover .idris-ring-dashed {
+  opacity: 0;
+}
+
+.idris-ai-tooltip {
+  position: absolute;
+  bottom: calc(100% + 12px);
+  left: 50%;
+  transform: translateX(-50%) translateY(4px);
+  background: #1a1a1a;
+  color: #fff;
+  font-family: Outfit;
+  font-size: 12px;
+  padding: 7px 14px;
+  border-radius: 20px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--idris-t-med) var(--idris-ease),transform var(--idris-t-med) var(--idris-ease);
+}
+
+.idris-ai-tooltip::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: #1a1a1a;
+}
+
+.idris-ai-button:hover .idris-ai-tooltip {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.idris-wave {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  height: 22px;
+}
+
+.idris-wave span {
+  width: 3px;
+  border-radius: 2px;
+  background: #93c5fd;
+  will-change: transform;
+  animation: idris-wave-bar .85s ease-in-out infinite;
+  animation-play-state: paused;
+}
+
+.idris-ai-button.idris-state-speaking .idris-wave span {
+  animation-play-state: running;
+}
+
+.idris-wave span:nth-child(1) {
+  height: 8px;
+  animation-delay: 0s;
+}
+
+.idris-wave span:nth-child(2) {
+  height: 16px;
+  animation-delay: .1s;
+}
+
+.idris-wave span:nth-child(3) {
+  height: 22px;
+  animation-delay: .2s;
+}
+
+.idris-wave span:nth-child(4) {
+  height: 14px;
+  animation-delay: .3s;
+}
+
+.idris-wave span:nth-child(5) {
+  height: 10px;
+  animation-delay: .4s;
 }
 
 .idris-ai-box {
@@ -2513,7 +3104,68 @@ export default function AIAssistant() {
     bottom: 20px;
   }
 }
+
+@keyframes idris-pulse-ring {
+  0% {
+    transform: scale(1);
+    opacity: .5;
+  }
+  100% {
+    transform: scale(1.65);
+    opacity: 0;
+  }
+}
+
+.idris-ai-beacon {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #1a1a1a;
+  pointer-events: none;
+  animation: idris-pulse-ring 1.6s ease-out infinite;
+}
+
+@keyframes idris-pulse-ring-screen {
+  0% {
+    transform: scale(1);
+    opacity: .5;
+  }
+  100% {
+    transform: scale(180);
+    opacity: 0;
+  }
+}
+
+.idris-screen-ripple {
+  position: fixed;
+  right: 40px;
+  bottom: 113px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #1a1a1a;
+  pointer-events: none;
+  z-index: 9990;
+  animation: idris-pulse-ring-screen 1s ease-out forwards;
+}
+
+@media(prefers-reduced-motion:reduce) {
+  .idris-screen-ripple {
+    display: none;
+  }
+  .idris-ai-beacon {
+    display: none;
+  }
+}
 `}</style>
+
+      {rippleSeq > 0 && (
+        <span
+          key={rippleSeq}
+          className="idris-screen-ripple"
+          aria-hidden="true"
+        />
+      )}
 
       <div className={`idris-ai-container ${open ? "open" : ""}`}>
         {open && (
@@ -2586,28 +3238,43 @@ export default function AIAssistant() {
         )}
 
         <button
-          className="idris-ai-button"
+          className={`idris-ai-button idris-state-${uiState}`}
           onClick={open ? closeAssistant : handleAssistantClick}
+          aria-label={open ? "Close AI Assistant" : "Ask AI"}
         >
-          {open ? (
-            <span
-              onClick={(e) => {
-                e.stopPropagation();
-                closeAssistant();
-              }}
-              style={{
-                color: "white",
-                fontSize: "28px",
-                cursor: "pointer",
-                zIndex: 10002,
-                position: "relative",
-              }}
-            >
-              ×
+          {!open && <span className="idris-ai-beacon" aria-hidden="true" />}
+
+          <span className="idris-ring-dashed" aria-hidden="true" />
+
+          <span className="idris-orbit" aria-hidden="true">
+            {ORBIT_DOTS.map((i) => (
+              <span key={i} className="idris-orbit-dot" style={{ "--i": i }} />
+            ))}
+          </span>
+
+          <span className="idris-ai-icon">
+            <span className="idris-icon-layer idris-icon-sparkle">
+              <SparkleIcon />
             </span>
-          ) : (
-            <span className="idris-ai-orb" />
-          )}
+            <span className="idris-icon-layer idris-icon-mic">
+              <MicIcon />
+            </span>
+            <span className="idris-icon-layer idris-icon-wave">
+              <span className="idris-wave">
+                <span />
+                <span />
+                <span />
+                <span />
+                <span />
+              </span>
+            </span>
+          </span>
+
+          <span className="idris-ai-close" aria-hidden="true">
+            ×
+          </span>
+
+          {!open && <span className="idris-ai-tooltip">Ask AI</span>}
         </button>
       </div>
     </>

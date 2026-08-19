@@ -15,13 +15,50 @@ const getFirstName = async (userId) => {
   return user?.name?.trim().split(/\s+/)[0] || "";
 };
 
+// This endpoint is the fallback for open-ended catalog questions that don't
+// match a specific tool (see intentController's search_products/
+// recommend_products for anything with an actual query/filter) - it has no
+// search terms to narrow by, so it previously sent the *entire* catalog,
+// full documents (description text, image arrays, everything), on every
+// single message. That made both the DB read and the prompt sent to Gemini
+// scale directly with catalog size, and was the single biggest contributor
+// to slow "thinking" latency. A lean, capped, bestseller-first slice keeps
+// the model's context small and fast while still covering what a broad
+// "what do you sell" style question needs.
+const CATALOG_CONTEXT_LIMIT = 150;
+
+// A chat session is typically several messages in quick succession, and the
+// catalog doesn't change second to second - caching this slice avoids a DB
+// round trip on every single message. 60s means a newly added/edited
+// product can take up to a minute to show up here, which is an acceptable
+// trade for cutting a DB read off the latency-critical path.
+const CATALOG_CACHE_TTL_MS = 60_000;
+let catalogCache = { data: null, expiresAt: 0 };
+
+const getCachedCatalog = async () => {
+  if (catalogCache.data && catalogCache.expiresAt > Date.now()) {
+    return catalogCache.data;
+  }
+
+  const products = await productModel
+    .find()
+    .select("name price category subCategory size bestseller")
+    .sort({ bestseller: -1, date: -1 })
+    .limit(CATALOG_CONTEXT_LIMIT)
+    .lean();
+
+  catalogCache = { data: products, expiresAt: Date.now() + CATALOG_CACHE_TTL_MS };
+  return products;
+};
+
 export const chatBot = async (req, res) => {
   try {
     const { message } = req.body;
 
-    // Sare products fetch karo
-    const products = await productModel.find().lean();
-    const firstName = await getFirstName(req.userId);
+    const [products, firstName] = await Promise.all([
+      getCachedCatalog(),
+      getFirstName(req.userId),
+    ]);
 
     const response = await ai.models.generateContent({
       model: "gemini-3.6-flash",

@@ -24,6 +24,8 @@ export const NAVIGATE_DESTINATIONS = [
 ];
 
 export const PRODUCT_CATEGORIES = [
+  "men",
+  "women",
   "jacket",
   "hoodie",
   "sweater",
@@ -125,7 +127,8 @@ export const assistantTools = [
         },
         query: {
           type: Type.STRING,
-          description: "The product name (or close match) when the customer names a product not currently visible.",
+          description:
+            "The product name (or close match) when the customer names a product not currently visible, OR a superlative reference like 'the most expensive one', 'the cheapest', 'the newest', 'the bestseller' - pass it through as-is rather than declining to call this tool.",
         },
       },
     },
@@ -141,7 +144,11 @@ export const assistantTools = [
           type: Type.STRING,
           description: "id from visibleProducts/selectedProduct/cartLines if the product is currently on screen.",
         },
-        query: { type: Type.STRING, description: "Product name, if not currently visible." },
+        query: {
+          type: Type.STRING,
+          description:
+            "Product name, if not currently visible, OR a superlative reference like 'the most expensive one', 'the cheapest', 'the newest', 'the bestseller' - pass it through as-is rather than declining to call this tool.",
+        },
         size: { type: Type.STRING, description: "The size the customer stated, if any." },
         quantity: { type: Type.NUMBER, description: "How many to add. Defaults to 1 if not stated." },
         autoSelectSize: {
@@ -160,7 +167,11 @@ export const assistantTools = [
       type: Type.OBJECT,
       properties: {
         productId: { type: Type.STRING, description: "id from cartLines in the UI context." },
-        query: { type: Type.STRING, description: "Product name, if productId is unknown." },
+        query: {
+          type: Type.STRING,
+          description:
+            "Product name, if productId is unknown, OR a superlative reference like 'the most expensive one' - pass it through as-is.",
+        },
         size: { type: Type.STRING, description: "Which size line item in the cart to update." },
         quantity: { type: Type.NUMBER, description: "The exact target quantity the customer stated." },
       },
@@ -174,7 +185,11 @@ export const assistantTools = [
       type: Type.OBJECT,
       properties: {
         productId: { type: Type.STRING, description: "id from cartLines in the UI context." },
-        query: { type: Type.STRING, description: "Product name, if productId is unknown." },
+        query: {
+          type: Type.STRING,
+          description:
+            "Product name, if productId is unknown, OR a superlative reference like 'the most expensive one' - pass it through as-is.",
+        },
         size: { type: Type.STRING, description: "Leave empty to remove all sizes of this product." },
       },
     },

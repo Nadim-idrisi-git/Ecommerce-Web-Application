@@ -50,10 +50,12 @@ const Collection = () => {
     (aiFilters.maxPrice !== null && aiFilters.maxPrice !== undefined && aiFilters.maxPrice !== "")
   );
 
-  if (voiceProductIds && voiceProductIds.length > 0) {
+  if (voiceProductIds !== null) {
     // The assistant already announced an exact set of products (search or
     // recommendation) - show precisely that, in that order, rather than
-    // re-deriving an approximation.
+    // re-deriving an approximation. An empty array here is deliberate (the
+    // assistant searched and found nothing) and must still win over the
+    // fallback branches below, not be treated as "no filter set".
     const byId = new Map(products.map((item) => [item._id, item]));
     productsCopy = voiceProductIds.map((id) => byId.get(id)).filter(Boolean);
   } else if (hasAiFilter) {
