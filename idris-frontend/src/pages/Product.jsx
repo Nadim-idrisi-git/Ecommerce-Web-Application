@@ -105,10 +105,7 @@ const Product = () => {
                   src={productData.image[currentImageIndex]}
                   alt=""
                   onClick={() => setZoom(!zoom)}
-                  className={`cursor-zoom-in transition duration-500
-${zoom ? "scale-150" : "scale-100"}
-max-h-[90vh] object-contain
-`}
+                  className={`cursor-zoom-in transition duration-500 ${zoom ? "scale-150" : "scale-100"} max-h-[90vh] object-contain`}
                 />
 
                 <button
