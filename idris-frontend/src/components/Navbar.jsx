@@ -63,7 +63,15 @@ const Navbar = () => {
 
           <div className="group relative">
               <img onClick={() => token ? null : navigate('/login')} src={assets.profile_icon} className= "w-5 cursor-pointer" alt=""/>
-              <div className="absolute dropdown-menu right-0 pt-4 hidden group-hover:block">
+              {/* z-50: Hero's image slider animates via CSS `transform`,
+                  which creates its own stacking context - since it comes
+                  after Navbar in DOM order and neither had a z-index, it
+                  painted over this dropdown on any page that renders Hero
+                  (Home), while pages without a transformed element (e.g.
+                  Collection) were unaffected. An explicit z-index here
+                  keeps the dropdown on top regardless of what any page
+                  renders below it. */}
+              <div className="absolute dropdown-menu right-0 pt-4 hidden group-hover:block z-50">
                  <div className="flex flex-col gap-2 w-36 py-3 px-5 bg-slate-100 text-gray-500 rounded">
                     <p onClick={() => navigate(token ? '/profile' : '/login')} className="cursor-pointer hover:text-black">My Profile</p>
                     <p onClick={() => navigate(token ? '/addresses' : '/login')} className="cursor-pointer hover:text-black">Addresses</p>

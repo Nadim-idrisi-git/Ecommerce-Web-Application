@@ -55,6 +55,11 @@ Rules:
           ],
         },
       ],
+      // Transcription is a transcription task, not a reasoning one - the
+      // model's default "medium" thinking level adds latency here for no
+      // benefit, and every voice turn waits on this call before it can even
+      // start routing/answering.
+      config: { thinkingConfig: { thinkingLevel: "low" } },
     });
 
     const transcript =

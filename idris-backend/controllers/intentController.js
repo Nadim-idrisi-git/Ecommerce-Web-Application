@@ -2,15 +2,24 @@ import { GoogleGenAI } from "@google/genai";
 import { assistantTools } from "../utils/assistantTools.js";
 import { assistantToolSanitizers } from "../utils/assistantToolSanitizers.js";
 import { sanitizeUIContext } from "../utils/uiContext.js";
+import {
+  getCachedCatalog,
+  getFirstName,
+  buildPersonaPrompt,
+  sanitizeHistory,
+} from "../utils/aiChatContext.js";
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
 });
 
 const ALLOWED_TOOL_NAMES = new Set(assistantTools.map((tool) => tool.name));
-const NO_REPLY_SENTINEL = "NONE";
-const MAX_HISTORY_TURNS = 4;
-const MAX_HISTORY_CONTENT_LENGTH = 300;
+// Structural marker the model must prefix an ambiguous-reference clarifying
+// question with, and nothing else - lets the response be parsed
+// deterministically into "still needs an answer from the customer" vs "this
+// is the final answer", instead of guessing from free text. See
+// extractReplyText/replyType below.
+const CLARIFY_PREFIX = "CLARIFY:";
 const MAX_ACTIVITY_ENTRIES = 8;
 const MAX_ACTIVITY_ENTRY_LENGTH = 200;
 
@@ -26,28 +35,6 @@ const sanitizeRecentActivity = (activity) => {
     .filter((item) => typeof item === "string" && item.trim())
     .slice(-MAX_ACTIVITY_ENTRIES)
     .map((item) => item.trim().slice(0, MAX_ACTIVITY_ENTRY_LENGTH));
-};
-
-// Only ever populated by the frontend with the exchange that led to a
-// clarifying question (see pendingActionRef "clarification" in
-// AIAssistant.jsx), never arbitrary free-form chat history - each entry is
-// independently re-validated/capped here regardless of what the client sent.
-const sanitizeHistory = (history) => {
-  if (!Array.isArray(history)) return [];
-
-  return history
-    .filter(
-      (item) =>
-        item &&
-        typeof item.content === "string" &&
-        item.content.trim() &&
-        (item.role === "user" || item.role === "assistant"),
-    )
-    .slice(-MAX_HISTORY_TURNS)
-    .map((item) => ({
-      role: item.role === "assistant" ? "model" : "user",
-      parts: [{ text: item.content.trim().slice(0, MAX_HISTORY_CONTENT_LENGTH) }],
-    }));
 };
 
 const extractFunctionCall = (response) => {
@@ -79,6 +66,11 @@ export const detectAIIntent = async (req, res) => {
       });
     }
 
+    const [products, firstName] = await Promise.all([
+      getCachedCatalog(),
+      getFirstName(req.userId),
+    ]);
+
     const historyContents = sanitizeHistory(history);
     const safeRecentActivity = sanitizeRecentActivity(recentActivity);
 
@@ -93,7 +85,9 @@ export const detectAIIntent = async (req, res) => {
     };
 
     const promptText = `
-You are the action router for the IDRIS ecommerce website.
+You are the action router AND the conversational assistant for the IDRIS
+ecommerce website, combined into one step so a general question never needs
+a second round trip.
 
 Call exactly one of the available tools if the customer's message clearly
 asks for browsing, searching, recommendations, sorting, navigation, cart
@@ -116,18 +110,24 @@ looked at earlier"). If the customer's request already stands on its own,
 ignore this and just handle it normally.\n`
   : ""}
 ${historyContents.length
-  ? `\nThe conversation above this message shows a clarifying question you just
-asked the customer because their previous request was ambiguous. Treat the
-customer's message below as the answer to that specific question, combine
-it with the original request to resolve exactly which item/cart line/order
-they mean, and call the matching tool. Only ask another clarifying question
-if their answer is still genuinely ambiguous.\n`
+  ? `\nThe conversation above this message is the real prior turns of this
+same chat (oldest first) - it may include a clarifying question you asked
+because a previous request was ambiguous (treat the customer's message
+below as the answer to that specific question, combine it with the
+original request to resolve exactly which item/cart line/order they mean,
+and call the matching tool), or it may just be earlier general
+conversation (use it so you don't repeat information you already gave,
+don't re-introduce yourself if you already greeted the customer, and can
+resolve short follow-ups like "and in blue?" or "how long does that take?"
+against what was just discussed). Only ask another clarifying question if
+the customer's message is still genuinely ambiguous on its own.\n`
   : ""}
 If the customer's message references a specific item, cart line, or order
 ambiguously (e.g. "open this", "add the second one", "cancel my order" when
 there is more than one order) and you cannot confidently tell which one
-they mean from the UI context above, do NOT call a tool - instead reply
-with one short clarifying question that names the visible options.
+they mean from the UI context above, do NOT call a tool - instead respond
+with exactly ${CLARIFY_PREFIX} followed by one short clarifying question
+that names the visible options, and nothing else before or after it.
 
 Cart rules: never call add_to_cart/update_cart_quantity/remove_from_cart
 unless the customer explicitly asked for that change in this message -
@@ -152,13 +152,19 @@ allowed, ask instead.
 
 For any other message that doesn't match a tool and isn't an ambiguous
 reference needing clarification (general questions, greetings, store
-policy, small talk), do NOT call a tool and do NOT try to answer it
-yourself - reply with exactly the single word ${NO_REPLY_SENTINEL} and
-nothing else.
+policy, small talk, questions about a product's price/size/availability),
+do NOT call a tool - instead answer directly, in plain text with no
+${CLARIFY_PREFIX} prefix, following the persona and catalog below.
 
 Never invent a tool or arguments that are not declared. There is no tool
 to modify prices, inventory, product data, or another customer's data -
 never imply you can do any of that.
+
+${buildPersonaPrompt(firstName)}
+
+Product Catalog (for answering general/catalog questions only - browsing/
+search/recommendation requests should go through a tool call above instead):
+${JSON.stringify(products)}
 
 Customer message:
 ${message}
@@ -170,6 +176,11 @@ ${message}
       config: {
         tools: [{ functionDeclarations: assistantTools }],
         toolConfig: { functionCallingConfig: { mode: "AUTO" } },
+        // Routing + short replies are a classification-shaped task, not one
+        // that benefits from multi-step reasoning - gemini-3.6-flash
+        // defaults to "medium" thinking, which spends latency reasoning
+        // through a task this simple for no quality benefit here.
+        thinkingConfig: { thinkingLevel: "low" },
       },
     });
 
@@ -188,13 +199,17 @@ ${message}
       }
     }
 
-    const replyText = extractReplyText(response);
-    const isClarification = replyText && replyText.toUpperCase() !== NO_REPLY_SENTINEL;
+    const rawReply = extractReplyText(response);
+    const isClarification = rawReply.toUpperCase().startsWith(CLARIFY_PREFIX);
+    const replyText = isClarification
+      ? rawReply.slice(CLARIFY_PREFIX.length).trim()
+      : rawReply;
 
     return res.json({
       success: true,
       tool: null,
-      reply: isClarification ? replyText.slice(0, 300) : null,
+      reply: replyText ? replyText.slice(0, 600) : null,
+      replyType: replyText ? (isClarification ? "clarification" : "answer") : null,
     });
   } catch (error) {
     console.error("AI intent detection error:", error);

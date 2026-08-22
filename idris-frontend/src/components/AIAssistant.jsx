@@ -303,9 +303,13 @@ export default function AIAssistant() {
   // `user` is already resolved server-side (JWT-verified /api/user/profile) -
   // only the first name is ever used here, never the full profile object.
   const firstName = user?.name?.trim().split(/\s+/)[0] || "";
+  // Hindi is the assistant's default/first language (matches the DEVANAGARI_PATTERN
+  // check in speakText, which picks the Hindi voice automatically for Devanagari
+  // text) - it only switches to English/another language once the customer's own
+  // message shows that's what they're using (see buildPersonaPrompt).
   const greetingLine = firstName
-    ? `Hi ${firstName}, how can I assist you?`
-    : "How can I assist you?";
+    ? `नमस्ते ${firstName}, मैं आपकी कैसे मदद कर सकती हूं?`
+    : "नमस्ते! मैं आपकी कैसे मदद कर सकती हूं?";
   const [open, setOpen] = useState(false);
   // Bumped on every open so a fresh <span key={rippleSeq}> mounts and its
   // one-shot CSS animation restarts (a re-render with the same key would
@@ -325,7 +329,7 @@ export default function AIAssistant() {
   const [, setAiReply] = useState("");
   const [currentAction, setCurrentAction] = useState("");
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [, setConversationHistory] = useState([]);
+  const [conversationHistory, setConversationHistory] = useState([]);
   const [securityNotice, setSecurityNotice] = useState("");
   const [voiceError, setVoiceError] = useState("");
 
@@ -350,6 +354,10 @@ export default function AIAssistant() {
   // state no matter how long the recognition session has been running.
   const processVoiceTextRef = useRef(null);
   const pauseTimerRef = useRef(null);
+  // Nudges the customer if the mic has been open with no speech from them at
+  // all for a while - separate from pauseTimerRef, which is about detecting
+  // the end of a single utterance, not a whole idle stretch of the session.
+  const silenceTimerRef = useRef(null);
   const listeningSessionRef = useRef(false);
   const hadSpeechRef = useRef(false);
   const voiceModeRef = useRef("recognition");
@@ -400,6 +408,13 @@ export default function AIAssistant() {
   // pendingActionRef synchronously before the async call starts, so a
   // duplicate "yes" arriving while it's still in flight can't double-submit.
   const isProcessingActionRef = useRef(false);
+  // Speak the greeting once per open conversation, not once per listening
+  // session. startRecording()/startMediaRecorderSession() can restart the
+  // mic mid-conversation (a SpeechRecognition error falling back to the
+  // MediaRecorder path, or retryVoiceSession after a transient error) -
+  // without this guard every one of those restarts replayed the greeting,
+  // which is what made the assistant appear to "start over" mid-chat.
+  const hasGreetedRef = useRef(false);
 
   const isBraveBrowser = () =>
     Boolean(window.navigator.brave) ||
@@ -571,6 +586,7 @@ export default function AIAssistant() {
 
       if (Math.sqrt(sumSquares / buffer.length) > VOLUME_THRESHOLD) {
         stopSpeaking();
+        clearSilenceTimer();
       }
 
       rafId = requestAnimationFrame(tick);
@@ -635,6 +651,7 @@ export default function AIAssistant() {
       // there's no voice backend to actually pick it up, undo that so the
       // UI doesn't get stuck showing "Speaking" forever.
       setIsSpeaking(false);
+      scheduleSilenceNudge();
       return;
     }
 
@@ -646,8 +663,16 @@ export default function AIAssistant() {
     utterance.voice = getPreferredVoice(speechLang);
 
     utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
+    // Back to genuinely idle-and-waiting - restart the "are you still
+    // there" countdown from here (see scheduleSilenceNudge's declaration).
+    utterance.onend = () => {
+      setIsSpeaking(false);
+      scheduleSilenceNudge();
+    };
+    utterance.onerror = () => {
+      setIsSpeaking(false);
+      scheduleSilenceNudge();
+    };
 
     speechSynthesisRef.current?.speak(utterance);
   };
@@ -695,6 +720,12 @@ export default function AIAssistant() {
         livePendingSourcesRef.current.length === 0
       ) {
         setIsSpeaking(false);
+        // Back to genuinely idle-and-waiting - restart the "are you still
+        // there" countdown from here (see scheduleSilenceNudge's
+        // declaration). Only for the still-current generation - a
+        // superseded/interrupted stream (barge-in) already gets its
+        // reschedule from the path that interrupted it, not from here.
+        scheduleSilenceNudge();
       }
     };
   };
@@ -822,6 +853,62 @@ export default function AIAssistant() {
       if (!listeningSessionRef.current) return;
       if (!hadSpeechRef.current) return;
     }, 5000);
+  };
+
+  const SILENCE_NUDGE_MS = 45000;
+  // Caps how many times in a row the assistant will nudge a customer who
+  // never responds at all, so a tab left open overnight doesn't keep
+  // speaking (and billing voice synthesis) forever. Reset to 0 the moment
+  // the customer actually says anything.
+  const MAX_CONSECUTIVE_SILENCE_NUDGES = 3;
+  const silenceNudgeCountRef = useRef(0);
+
+  const clearSilenceTimer = () => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  };
+
+  // Mirrors the assistant's own Hindi-first-then-match-customer language rule
+  // (see aiChatContext.js's persona prompt), using the same script check
+  // speakText already uses to pick a voice, so the nudge doesn't switch
+  // languages on its own mid-conversation. Falls back to Hindi (the default)
+  // when nothing has been said yet.
+  const pickSilenceNudgeText = () => {
+    const lastTurn = [...conversationHistory]
+      .reverse()
+      .find((entry) => entry.content?.trim());
+    const isEnglish = Boolean(lastTurn) && detectSpeechLang(lastTurn.content) === "en-IN";
+
+    return isEnglish
+      ? "I'm still here to help you — just let me know what you'd like."
+      : "मैं आपकी सहायता के लिए यहीं हूं, बताइए आपको क्या चाहिए।";
+  };
+
+  // Restarts the 45s "are you still there" countdown for the current
+  // listening session. Called whenever the assistant genuinely returns to
+  // idle-and-waiting (mic session starts, or a spoken reply finishes) -
+  // and cleared the instant the customer makes any sound (see
+  // clearSilenceTimer's call sites), so it only ever fires after a truly
+  // continuous stretch of silence, never mid-turn.
+  const scheduleSilenceNudge = () => {
+    clearSilenceTimer();
+
+    if (silenceNudgeCountRef.current >= MAX_CONSECUTIVE_SILENCE_NUDGES) return;
+
+    silenceTimerRef.current = setTimeout(() => {
+      if (!listeningSessionRef.current) return;
+
+      silenceNudgeCountRef.current += 1;
+      const nudge = pickSilenceNudgeText();
+      setAiReply(nudge);
+      speakText(nudge);
+      pushHistory("assistant", nudge);
+      // Still silent after the nudge - keep checking (up to the cap above)
+      // rather than nagging once and then never following up again.
+      scheduleSilenceNudge();
+    }, SILENCE_NUDGE_MS);
   };
 
   const resetVoiceState = () => {
@@ -1004,7 +1091,13 @@ export default function AIAssistant() {
         score += 4;
       }
 
-      if (product.bestseller) {
+      // Bestseller only breaks ties among products already relevant to the
+      // occasion - gated on score > 0 so a bestseller with no topical match
+      // at all (e.g. a bestselling saree recommended for "office wear")
+      // can't reach the score > 0 cutoff below on the bonus alone. This was
+      // previously unconditional, which is how unrelated bestsellers ended
+      // up mixed into every occasion-based recommendation.
+      if (product.bestseller && score > 0) {
         score += 2;
       }
 
@@ -2091,7 +2184,11 @@ export default function AIAssistant() {
 
     recorder.onstart = () => {
       setStatus("listening");
-      speakText(greetingLine);
+      scheduleSilenceNudge();
+      if (!hasGreetedRef.current) {
+        hasGreetedRef.current = true;
+        speakText(greetingLine);
+      }
     };
 
     recorder.ondataavailable = (event) => {
@@ -2166,6 +2263,14 @@ export default function AIAssistant() {
     const normalizedText = text.trim();
 
     if (!normalizedText) return;
+
+    // The customer has said something - reset the silence-nudge streak and
+    // stop any pending countdown for the duration of this turn (it restarts
+    // once the assistant's reply finishes speaking, see scheduleSilenceNudge's
+    // call sites). Mainly a safety net here for the MediaRecorder path, which
+    // has no onspeechstart-equivalent event of its own to clear it earlier.
+    silenceNudgeCountRef.current = 0;
+    clearSilenceTimer();
 
     setTranscript(normalizedText);
     pushHistory("user", normalizedText);
@@ -2300,10 +2405,20 @@ export default function AIAssistant() {
 
     let toolCall = null;
 
+    // The real recent transcript (oldest first), not just the clarification-
+    // specific slice - the intent endpoint now also answers general
+    // conversation directly, so it needs this to avoid re-greeting or
+    // repeating itself and to resolve short follow-ups ("and in blue?").
+    // Already capped to the last 11 turns by pushHistory; trimmed further
+    // here to keep the request small.
+    const recentHistory = conversationHistory
+      .slice(-8)
+      .map(({ role, content }) => ({ role, content }));
+
     try {
       toolCall = await getAssistantTool(
         normalizedText,
-        clarificationHistory || [],
+        clarificationHistory || recentHistory,
       );
     } catch (error) {
       console.error("AI tool selection error:", error);
@@ -2321,12 +2436,12 @@ export default function AIAssistant() {
         toolCall.arguments || {},
         normalizedText,
       );
-    } else if (toolCall?.reply) {
+    } else if (toolCall?.reply && toolCall.replyType === "clarification") {
       // The model had live UI context but couldn't confidently resolve an
       // ambiguous reference (e.g. "open this") - ask the clarifying
-      // question it produced instead of guessing or handing off to the
-      // context-blind general chatbot. Remember the exchange so the next
-      // utterance is understood as the answer to this exact question.
+      // question it produced instead of guessing. Remember the exchange so
+      // the next utterance is understood as the answer to this exact
+      // question.
       assistantResponse = toolCall.reply;
       setCurrentAction("Clarification requested");
       setAiReply(assistantResponse);
@@ -2334,14 +2449,24 @@ export default function AIAssistant() {
       pendingActionRef.current = {
         type: "clarification",
         history: [
-          ...(clarificationHistory || []),
+          ...(clarificationHistory || recentHistory),
           { role: "user", content: normalizedText },
           { role: "assistant", content: assistantResponse },
         ].slice(-6),
       };
+    } else if (toolCall?.reply) {
+      // No tool matched and no clarification needed - the same call already
+      // produced the general-conversation answer (catalog + persona aware,
+      // with real conversation history), so it can be spoken directly
+      // without a second network round trip to the chat endpoint.
+      assistantResponse = toolCall.reply;
+      setCurrentAction("Answered");
+      setAiReply(assistantResponse);
+      speakText(assistantResponse);
     } else {
-      // No tool matched and no clarification needed - general conversation,
-      // hand off to the catalog-aware chatbot.
+      // Only reached when the intent call itself failed/threw and the
+      // offline fallback couldn't match a tool either - last-resort retry
+      // against the plain chat endpoint.
       assistantResponse = await sendTranscriptToAI(normalizedText);
     }
 
@@ -2374,6 +2499,7 @@ export default function AIAssistant() {
 
     recognition.onstart = () => {
       setStatus("listening");
+      scheduleSilenceNudge();
     };
 
     // Barge-in: cut the assistant off the instant the user starts talking,
@@ -2385,10 +2511,12 @@ export default function AIAssistant() {
     // stopSpeaking() is a safe no-op when nothing is currently playing.
     recognition.onspeechstart = () => {
       stopSpeaking();
+      clearSilenceTimer();
     };
 
     recognition.onresult = (event) => {
       clearPauseTimer();
+      clearSilenceTimer();
 
       let finalText = "";
       let interimText = "";
@@ -2512,19 +2640,22 @@ export default function AIAssistant() {
 
   // Calls the backend's allowlisted tool-selection endpoint, including a
   // redacted snapshot of what's currently on screen so it can resolve
-  // references like "this one". Returns { tool: null, reply } when the
-  // model needs to ask a clarifying question, or { tool: null, reply: null }
-  // for general conversation the chat endpoint should handle instead.
-  // `history` carries the prior ambiguous request + clarifying question when
-  // this call is answering one (see pendingActionRef "clarification" in
-  // processVoiceText) so the model can resolve the follow-up in context
-  // instead of seeing it as a brand new, unrelated utterance. recentActivity
-  // is the session's rolling log of past searches/commands (memoryRef),
-  // always sent, so the model can resolve follow-ups that reference
-  // something earlier in the conversation even when it's no longer what's
-  // on screen (e.g. "cheaper ones than what I searched before").
-  // Throws on network/config failure so the caller can fall back to
-  // localFallbackTool.
+  // references like "this one". This endpoint now also answers general
+  // conversation directly (see intentController's persona/catalog prompt),
+  // so it returns one of: { tool } for an action, { reply, replyType:
+  // "clarification" } when the model needs to ask about an ambiguous
+  // reference, or { reply, replyType: "answer" } for a normal conversational
+  // reply - callers should treat the last two differently (a clarification
+  // expects the customer's next utterance to be its answer; a plain answer
+  // does not). `history` is the real recent conversation (oldest first) so
+  // the model can resolve follow-ups and clarifying-question answers in
+  // context, and general chat doesn't come back blank on what was already
+  // said. recentActivity is the session's rolling log of past searches/
+  // commands (memoryRef), always sent, so the model can resolve follow-ups
+  // that reference something earlier in the conversation even when it's no
+  // longer what's on screen (e.g. "cheaper ones than what I searched
+  // before"). Throws on network/config failure so the caller can fall back
+  // to localFallbackTool.
   const getAssistantTool = async (text, history = []) => {
     const { backendUrl, apiConfigError } = getApiConfig();
 
@@ -2538,6 +2669,7 @@ export default function AIAssistant() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...(token ? { token } : {}),
         },
         body: JSON.stringify({
           message: text,
@@ -2559,6 +2691,7 @@ export default function AIAssistant() {
       tool: data.tool || null,
       arguments: data.arguments || {},
       reply: data.reply || null,
+      replyType: data.replyType || null,
     };
   };
 
@@ -2596,7 +2729,10 @@ export default function AIAssistant() {
 
       if (recognition) {
         setStatus("listening");
-        speakText(greetingLine);
+        if (!hasGreetedRef.current) {
+          hasGreetedRef.current = true;
+          speakText(greetingLine);
+        }
         try {
           recognition.start();
         } catch {
@@ -2619,6 +2755,8 @@ export default function AIAssistant() {
     listeningSessionRef.current = false;
     hadSpeechRef.current = false;
     clearPauseTimer();
+    clearSilenceTimer();
+    silenceNudgeCountRef.current = 0;
 
     if (recognitionRef.current) {
       try {
@@ -2669,6 +2807,10 @@ export default function AIAssistant() {
     stopSpeaking();
 
     setOpen(false);
+    // Next open is a fresh conversation from the customer's point of view -
+    // it should be greeted again. Only a mid-conversation mic restart (see
+    // hasGreetedRef's declaration) should skip the greeting.
+    hasGreetedRef.current = false;
   };
 
   const retryVoiceSession = () => {

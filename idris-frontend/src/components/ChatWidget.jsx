@@ -125,11 +125,14 @@ function ChatWindow({ onClose }) {
   const backendUrl = import.meta.env.VITE_BACKEND_URL;
   const { token } = useContext(ShopContext);
   const isMobile = window.innerWidth <= 768;
+  // Hindi is Zara's default/first language (matches the persona rule in
+  // aiChatContext.js) - the backend switches to whatever language the
+  // customer's own messages use from here on.
   const [messages, setMessages] = useState([
     {
       id: 1,
       role: "bot",
-      text: `Welcome to IDRIS. 🖤 I'm Zara, your personal style assistant. How can I help you today?`,
+      text: `IDRIS में आपका स्वागत है। 🖤 मैं ज़ारा हूं, आपकी पर्सनल स्टाइल असिस्टेंट। मैं आपकी कैसे मदद कर सकती हूं?`,
     },
   ]);
   const [input, setInput] = useState("");
@@ -160,10 +163,22 @@ function ChatWindow({ onClose }) {
 
   try {
 
+    // The backend now accepts recent turns and folds them into the model's
+    // context - without this every message was answered from a blank
+    // slate, which is why the bot used to repeat itself and re-greet
+    // mid-conversation. Sent from `messages` (state before this turn's
+    // user message was appended above), capped and mapped to the
+    // role/content shape the backend expects.
+    const history = messages.slice(-8).map((msg) => ({
+      role: msg.role === "bot" ? "assistant" : "user",
+      content: msg.text,
+    }));
+
     const { data } = await axios.post(
       `${backendUrl}/api/chat`,
       {
-        message: text
+        message: text,
+        history,
       },
       token ? { headers: { token } } : undefined
     );
@@ -481,19 +496,32 @@ export default function ChatWidget() {
         @keyframes slideUp { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:translateY(0)} }
       `}</style>
 
-      {/* ONLY the floating widget — no background, no wrapper page */}
+      {/* ONLY the floating widget — no background, no wrapper page.
+          This div spans the full viewport width (left:10px to right:10px)
+          just to right-align its content via flex; ChatWindow relies on
+          that same full width for its own `width:100%` on mobile, so the
+          wrapper's box can't just be shrunk to content. Left as an
+          invisible full-width box though, it sat at the same z-index as -
+          and after, so on top of - the AI Assistant's floating button
+          wherever the two overlapped near the bottom of small screens,
+          swallowing taps everywhere except the sliver of that button
+          poking out above it. pointer-events:none here (with auto put
+          back on the two actual interactive children below) makes empty
+          space in this box transparent to clicks instead of capturing
+          them. */}
       <div
         style={{
           position: "fixed",
+          pointerEvents: "none",
           bottom: "16px",
           right: "10px", left: "10px", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 12, zIndex: 9999,}}>
         {open && (
-          <div style={{ animation: "slideUp 0.25s ease" }}>
+          <div style={{ animation: "slideUp 0.25s ease", pointerEvents: "auto" }}>
             <ChatWindow onClose={() => setOpen(false)} />
           </div>
         )}
 
-        <div style={{ position: "relative" }}>
+        <div style={{ position: "relative", pointerEvents: "auto" }}>
           <button
             onClick={() => setOpen((o) => !o)}
             style={{
