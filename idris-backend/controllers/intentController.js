@@ -7,6 +7,7 @@ import {
   getFirstName,
   buildPersonaPrompt,
   sanitizeHistory,
+  sanitizeMessage,
 } from "../utils/aiChatContext.js";
 
 const ai = new GoogleGenAI({
@@ -57,9 +58,10 @@ const extractReplyText = (response) => {
 
 export const detectAIIntent = async (req, res) => {
   try {
-    const { message, uiContext, history, recentActivity } = req.body;
+    const message = sanitizeMessage(req.body?.message);
+    const { uiContext, history, recentActivity } = req.body;
 
-    if (!message || typeof message !== "string") {
+    if (!message) {
       return res.status(400).json({
         success: false,
         message: "Message is required",

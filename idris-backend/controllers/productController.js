@@ -7,7 +7,7 @@ import path from "path";
 
 const addProduct = async (req, res) => {
     try {
-        const { name, description, price, category, subCategory, bestseller, size } = req.body;
+        const { name, description, price, category, subCategory, color, bestseller, size } = req.body;
 
         const image1 = req.files?.image1 && req.files.image1[0];
         const image2 = req.files?.image2 && req.files.image2[0];
@@ -47,6 +47,7 @@ const addProduct = async (req, res) => {
             images: imageUrls,
             category,
             subCategory,
+            color: color || "",
             size: JSON.parse(size),
             bestseller: bestseller === "true" ? true : false,
             date: Date.now()
@@ -158,7 +159,7 @@ const removeProduct = async (req, res) => {
 // function for updating product details
 const updateProduct = async (req, res) => {
     try {
-        const { id, name, description, price, category, subCategory, bestseller, size } = req.body;
+        const { id, name, description, price, category, subCategory, color, bestseller, size } = req.body;
 
         const updatedProduct = await productModel.findByIdAndUpdate(
             id,
@@ -168,6 +169,7 @@ const updateProduct = async (req, res) => {
                 price: Number(price),
                 category,
                 subCategory,
+                color: color || "",
                 bestseller: bestseller === true || bestseller === "true",
                 size: Array.isArray(size) ? size : JSON.parse(size),
             },

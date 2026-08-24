@@ -2,20 +2,20 @@
 // both AIAssistant (to count/speak results) and Collection (to display them)
 // so the two stay in sync.
 //
-// The catalog doesn't carry every facet the assistant can extract (e.g.
-// there's no `color` field on products at all). A strict AND filter across
-// query/category/color/price means one unsupported keyword (like "black")
-// zeroes out every result, even when the rest of the request (jacket,
-// winter, men) genuinely matches real products. Instead, every keyword is
-// scored against each product's text - a keyword nothing matches simply
-// contributes nothing, rather than excluding everything.
+// A strict AND filter across query/category/color/price would zero out
+// every result the moment one keyword doesn't match anything, even when the
+// rest of the request (jacket, winter, men) genuinely matches real
+// products. Instead, every keyword is scored against each product -
+// a keyword nothing matches simply contributes nothing, rather than
+// excluding everything.
 
-// category/subCategory are controlled facet values (Men/Women/Kids,
-// Topwear/Bottomwear/Winterwear), not free text - they need an exact match
-// against the product's actual field, not a substring scan. Folding them
-// into the same haystack as name/description used to mean "men" scored a
-// hit on any "Women" product too, since the substring "men" literally
-// appears inside "women" (wo-MEN).
+// category/subCategory/color are controlled facet values (Men/Women/Kids,
+// Topwear/Bottomwear/Winterwear, and the fixed color palette products are
+// tagged with - see the admin's color dropdown), not free text - they need
+// an exact match against the product's actual field, not a substring scan.
+// Folding them into the same haystack as name/description used to mean
+// "men" scored a hit on any "Women" product too, since the substring "men"
+// literally appears inside "women" (wo-MEN).
 const STRUCTURED_FACET_VALUES = new Set([
   "men",
   "women",
@@ -23,7 +23,29 @@ const STRUCTURED_FACET_VALUES = new Set([
   "topwear",
   "bottomwear",
   "winterwear",
+  "black",
+  "white",
+  "blue",
+  "red",
+  "green",
+  "yellow",
+  "pink",
+  "brown",
+  "grey",
+  "gray",
+  "beige",
+  "navy",
+  "maroon",
+  "olive",
 ]);
+
+// "grey"/"gray" are the same color under two spellings - products are
+// stored with one canonical spelling (see the admin dropdown), but a
+// customer or the AI may use either, so both need to match the same thing.
+const normalizeColor = (value) => {
+  const lower = (value || "").toLowerCase();
+  return lower === "gray" ? "grey" : lower;
+};
 
 const productHaystack = (product) =>
   [product.name, product.description]
@@ -49,10 +71,19 @@ export const scoreProducts = (products, keywords) =>
     const haystack = productHaystack(product);
     const category = (product.category || "").toLowerCase();
     const subCategory = (product.subCategory || "").toLowerCase();
+    const color = normalizeColor(product.color);
 
     const score = keywords.reduce((total, word) => {
       if (STRUCTURED_FACET_VALUES.has(word)) {
-        return total + (word === category || word === subCategory ? 1 : 0);
+        const normalizedWord = normalizeColor(word);
+        return (
+          total +
+          (word === category ||
+          word === subCategory ||
+          (color && normalizedWord === color)
+            ? 1
+            : 0)
+        );
       }
       return total + (haystack.includes(word) ? 1 : 0);
     }, 0);

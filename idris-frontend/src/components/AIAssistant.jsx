@@ -333,14 +333,77 @@ export default function AIAssistant() {
   const [securityNotice, setSecurityNotice] = useState("");
   const [voiceError, setVoiceError] = useState("");
 
+  // Mirrors isSpeaking for use inside SpeechRecognition's callbacks, which
+  // are fixed closures created once by ensureRecognition() (see its
+  // onspeechstart comment) - a direct read of the isSpeaking state variable
+  // there would forever see whatever it was when recognition was first
+  // created, not its current value. Also used by the MediaRecorder/VAD
+  // path's echo guard (see ECHO_GUARD_MS), where a plain ref is just the
+  // simplest way to read this synchronously inside the rAF tick loop.
+  // Kept in sync by the effect below.
+  const isSpeakingRef = useRef(false);
+  // Timestamp of the last time speaking actually stopped (naturally or via
+  // barge-in) - see ECHO_GUARD_MS's declaration for why.
+  const lastSpeakEndTimeRef = useRef(0);
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const audioChunksRef = useRef([]);
+  // Utterances captured - as { type: "audio", blob } from the MediaRecorder
+  // path, or { type: "text", text } already transcribed by the browser's
+  // own SpeechRecognition - while a previous one is still being
+  // transcribed/answered. Both voice paths keep listening the whole time
+  // (see startRecorderCycle and ensureRecognition's continuous mode), so
+  // without this a second thing said while the assistant was still
+  // "thinking" about the first would either be dropped or, worse, processed
+  // concurrently with it and race for the same shared conversation state.
+  // Drained strictly in order by runVoiceQueue so replies never arrive out
+  // of sequence.
+  const voiceQueueRef = useRef([]);
+  const isProcessingVoiceQueueRef = useRef(false);
+  // Caps how much can pile up if someone keeps talking through several
+  // replies in a row - drops the oldest so the assistant catches up on
+  // what was said most recently rather than working through an ever-longer
+  // backlog of stale commands. Kept small - each queued item is a full
+  // transcribe+answer round trip, so a deep backlog directly adds
+  // multiple seconds of extra wait before the assistant catches up to
+  // whatever was said most recently.
+  const MAX_QUEUED_UTTERANCES = 2;
+  // Accumulates SpeechRecognition's own final-result fragments for the
+  // *current* utterance (see recognition.onresult) - Chrome's recognizer
+  // frequently splits one sentence into several final segments at natural
+  // pauses ("I want" / "a red shirt"), and reacting to each in isolation is
+  // what made the assistant seem to only catch fragments of what was said.
+  // Cleared once schedulePauseResponse decides the utterance is actually
+  // over and hands the accumulated text off to the voice queue.
+  const recognizedTextBufferRef = useRef("");
+  // SpeechRecognition's transcription locale is fixed at "en-IN" for the
+  // whole session - a "hi-IN" default was tried to better recognize actual
+  // Hindi speech, but Safari's SpeechRecognition depends on the OS's own
+  // installed dictation language rather than a cloud model like Chrome's,
+  // and silently produces zero results (no error, "listening" still shows)
+  // when the language isn't available on the device - indistinguishable
+  // from the assistant simply going deaf, with no reliable way to detect
+  // that failure mode from here. en-IN is the confirmed-working baseline
+  // across Chrome/Safari/Brave. This doesn't affect reply language or
+  // Hindi/Hinglish *understanding* - Gemini still judges and replies in
+  // Hindi/Hinglish correctly regardless of what script the browser's own
+  // transcript comes back in (see buildPersonaPrompt) - it only means
+  // Hindi speech is transcribed through an English-tuned recognizer, which
+  // is less accurate than a native Hindi one would be.
   // Teardown for the MediaRecorder-path voice activity monitor (see
   // startVoiceActivityMonitor) - that path has no native "user started
   // talking" event the way SpeechRecognition does, so barge-in there needs
   // its own lightweight mic-level watcher.
   const vadCleanupRef = useRef(null);
+  // Whether the mic level has crossed VOLUME_THRESHOLD at all during the
+  // *current* MediaRecorder recording cycle (reset per cycle) - gates the
+  // end-of-utterance timer below so silence before the customer has said
+  // anything can't stop the recording early.
+  const utteranceSpeechDetectedRef = useRef(false);
+  // Debounces "the customer just stopped talking" for the MediaRecorder
+  // path, mirroring what SpeechRecognition's own end-of-speech detection
+  // gives the native path for free. See startVoiceActivityMonitor.
+  const utteranceEndTimerRef = useRef(null);
   const recognitionRef = useRef(null);
   // ensureRecognition() builds the SpeechRecognition object once and caches
   // it in recognitionRef for the rest of the session - its callbacks are
@@ -466,6 +529,13 @@ export default function AIAssistant() {
   }, []);
 
   useEffect(() => {
+    isSpeakingRef.current = isSpeaking;
+    if (!isSpeaking) {
+      lastSpeakEndTimeRef.current = Date.now();
+    }
+  }, [isSpeaking]);
+
+  useEffect(() => {
     speechSynthesisRef.current = window.speechSynthesis || null;
 
     const syncVoices = () => {
@@ -546,13 +616,32 @@ export default function AIAssistant() {
     return "webm";
   };
 
+  // Trailing silence after speech that means the customer is done talking,
+  // for the same purpose SpeechRecognition's own end-of-speech detection
+  // serves the native path. Long enough to survive a normal mid-sentence
+  // pause, short enough that replies don't lag noticeably behind the native
+  // path's.
+  const SPEECH_END_SILENCE_MS = 1100;
+  // Volume must stay above VOLUME_THRESHOLD for this long, continuously,
+  // before it counts as the start of a real utterance - filters out a
+  // single loud frame (a click, a cough, a stray noise spike) from being
+  // treated as "the customer said something," which otherwise queued up a
+  // full transcribe+answer round trip for pure noise. Each one of those
+  // adds several real seconds of latency before the *actual* command even
+  // starts being answered (see MAX_QUEUED_UTTERANCES), which is what made
+  // replies feel like they were taking up to a minute.
+  const MIN_SPEECH_DURATION_MS = 250;
+
   // MediaRecorder (the Brave/fallback voice path) has no equivalent of
-  // SpeechRecognition's onspeechstart event, so barge-in there needs its own
-  // watcher: a lightweight, separate analyser tap on the same mic stream
-  // that just watches volume and cuts the assistant off the instant the
-  // visitor starts talking, independent of the actual recording/transcript
-  // pipeline. Returns a cleanup function.
-  const startVoiceActivityMonitor = (stream) => {
+  // SpeechRecognition's onspeechstart/onspeechend events, so this watcher
+  // covers both jobs with one lightweight, separate analyser tap on the mic
+  // stream, independent of the actual recording/transcript pipeline:
+  // barge-in (cut the assistant off the instant the visitor starts talking)
+  // always, and - only when `onUtteranceEnd` is passed - ending the current
+  // recording once the customer has spoken and then gone quiet for
+  // SPEECH_END_SILENCE_MS, so a Brave session doesn't have to be manually
+  // stopped after every single utterance. Returns a cleanup function.
+  const startVoiceActivityMonitor = (stream, onUtteranceEnd) => {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (typeof AudioContextClass === "undefined") return () => {};
 
@@ -572,6 +661,10 @@ export default function AIAssistant() {
     const VOLUME_THRESHOLD = 0.035;
     let rafId = null;
     let stopped = false;
+    // When the volume most recently crossed VOLUME_THRESHOLD - null while
+    // below it. Used to require MIN_SPEECH_DURATION_MS of continuous sound
+    // before treating it as real speech (see MIN_SPEECH_DURATION_MS).
+    let aboveThresholdSince = null;
 
     const tick = () => {
       if (stopped) return;
@@ -587,6 +680,57 @@ export default function AIAssistant() {
       if (Math.sqrt(sumSquares / buffer.length) > VOLUME_THRESHOLD) {
         stopSpeaking();
         clearSilenceTimer();
+
+        if (onUtteranceEnd) {
+          // Ignore volume for utterance-detection purposes while the
+          // assistant is speaking, or shortly after (see ECHO_GUARD_MS) -
+          // its own voice coming back through the mic would otherwise get
+          // treated as the customer talking, recorded, and sent off to be
+          // "answered," which speaks another reply that gets picked up
+          // again - a self-triggering loop. getUserMedia's
+          // echoCancellation isn't a guaranteed fix here since the
+          // assistant's replies play through the raw Web Audio API rather
+          // than a standard <audio> element, which browser echo
+          // cancellation isn't guaranteed to track as a reference signal.
+          // stopSpeaking() above still runs unconditionally, so a genuine
+          // interruption still cuts the assistant off immediately even
+          // though it won't be captured as the next command until this
+          // window passes.
+          const inEchoWindow =
+            isSpeakingRef.current ||
+            Date.now() - lastSpeakEndTimeRef.current < ECHO_GUARD_MS;
+
+          if (inEchoWindow) {
+            aboveThresholdSince = null;
+          } else {
+            if (aboveThresholdSince === null) aboveThresholdSince = Date.now();
+
+            if (
+              !utteranceSpeechDetectedRef.current &&
+              Date.now() - aboveThresholdSince >= MIN_SPEECH_DURATION_MS
+            ) {
+              utteranceSpeechDetectedRef.current = true;
+            }
+          }
+
+          if (utteranceEndTimerRef.current) {
+            clearTimeout(utteranceEndTimerRef.current);
+            utteranceEndTimerRef.current = null;
+          }
+        }
+      } else {
+        aboveThresholdSince = null;
+
+        if (
+          onUtteranceEnd &&
+          utteranceSpeechDetectedRef.current &&
+          !utteranceEndTimerRef.current
+        ) {
+          utteranceEndTimerRef.current = setTimeout(() => {
+            utteranceEndTimerRef.current = null;
+            onUtteranceEnd();
+          }, SPEECH_END_SILENCE_MS);
+        }
       }
 
       rafId = requestAnimationFrame(tick);
@@ -597,6 +741,10 @@ export default function AIAssistant() {
     return () => {
       stopped = true;
       if (rafId) cancelAnimationFrame(rafId);
+      if (utteranceEndTimerRef.current) {
+        clearTimeout(utteranceEndTimerRef.current);
+        utteranceEndTimerRef.current = null;
+      }
       try {
         source.disconnect();
       } catch {
@@ -847,12 +995,47 @@ export default function AIAssistant() {
     }
   };
 
+  // How long to wait after SpeechRecognition's last final-result fragment
+  // before treating the utterance as actually finished. Chrome's recognizer
+  // fires a separate final result at natural mid-sentence pauses even in
+  // continuous mode, so reacting to the first one immediately would treat
+  // "I want" and "a red shirt" as two unrelated commands instead of one
+  // sentence - this debounce lets them accumulate in
+  // recognizedTextBufferRef first. Short enough that replies still feel
+  // responsive once the customer is genuinely done talking.
+  const RECOGNITION_PAUSE_MS = 900;
+
+  // Shared by both voice paths (recognition.onresult below, and the
+  // MediaRecorder/VAD path's utterance detection in
+  // startVoiceActivityMonitor) - without this, the assistant's own voice
+  // coming out of the speakers can get picked back up by the mic,
+  // recognized as if the customer said it, and answered, which speaks
+  // another reply that gets picked up again, and so on: a self-sustaining
+  // loop that looks exactly like "thinking again, speaking again" with no
+  // one talking. Neither path's echo cancellation is a guaranteed fix -
+  // SpeechRecognition's depends on the OS/browser's own implementation
+  // (Safari's isn't reliable here), and MediaRecorder's getUserMedia
+  // echoCancellation isn't guaranteed to track the assistant's replies as a
+  // reference signal since they play through the raw Web Audio API rather
+  // than a standard <audio> element. Speech detected while the assistant is
+  // speaking, or within this window right after it stops (covering the
+  // echo tail, and the brief lag before a barge-in's stopSpeaking() call
+  // has actually silenced the audio), is treated as suspected echo and
+  // ignored rather than treated as the next command.
+  const ECHO_GUARD_MS = 500;
+
   const schedulePauseResponse = () => {
     clearPauseTimer();
     pauseTimerRef.current = setTimeout(() => {
+      pauseTimerRef.current = null;
       if (!listeningSessionRef.current) return;
-      if (!hadSpeechRef.current) return;
-    }, 5000);
+
+      const text = recognizedTextBufferRef.current.trim();
+      recognizedTextBufferRef.current = "";
+      if (!text) return;
+
+      enqueueVoiceItem({ type: "text", text });
+    }, RECOGNITION_PAUSE_MS);
   };
 
   const SILENCE_NUDGE_MS = 45000;
@@ -1335,16 +1518,30 @@ export default function AIAssistant() {
   // Deterministic yes/no parsing for confirm-before-acting flows (place
   // order, cancel order) - never trusts the AI's own judgment about whether
   // consent was given, only a literal reading of the next utterance.
+  // Confirmation for place_order/cancel_order (and the size question below)
+  // is resolved locally against the customer's raw words, deterministically
+  // and without going back through the AI (see the pendingActionRef
+  // "confirm" handling in processVoiceText) - so unlike everything routed
+  // through Gemini, which already understands Hindi via buildPersonaPrompt,
+  // this regex is the *only* thing standing between a Hindi-speaking
+  // customer (Hindi is the assistant's default/first language) and being
+  // able to confirm or cancel an order at all. English-only here would mean
+  // saying "haan"/"हां" to confirm an order placed in Hindi just never
+  // matches anything.
   const parseYesNo = (text) => {
     const normalized = text.toLowerCase().trim();
     if (
-      /^(yes|yeah|yep|yup|sure|confirm|confirmed|go ahead|do it|okay|ok|please do|correct)\b/.test(
+      /^(yes|yeah|yep|yup|sure|confirm|confirmed|go ahead|do it|okay|ok|please do|correct|haan|han|ha|haa|ji haan|ji|bilkul|thik hai|theek hai|kar do|karo|हां|हाँ|जी|जी हां|बिल्कुल|ठीक है|कर दो|करो)\b/.test(
         normalized,
       )
     ) {
       return "yes";
     }
-    if (/^(no|nope|nah|cancel|never\s?mind|stop|don'?t)\b/.test(normalized)) {
+    if (
+      /^(no|nope|nah|cancel|never\s?mind|stop|don'?t|nahi|nahin|na|mat karo|rehne do|rahne do|नहीं|ना|मत करो|रहने दो)\b/.test(
+        normalized,
+      )
+    ) {
       return "no";
     }
     return null;
@@ -1353,12 +1550,18 @@ export default function AIAssistant() {
   const parseSizeAnswer = (text, availableSizes) => {
     const normalized = text.toLowerCase().trim();
 
-    if (/\b(cancel|never\s?mind|forget it|stop|no)\b/.test(normalized)) {
+    // Same Hindi-support reasoning as parseYesNo above - resolved locally,
+    // not through Gemini, so it needs its own Hindi/Hinglish coverage.
+    if (
+      /\b(cancel|never\s?mind|forget it|stop|no|nahi|nahin|na|rehne do|rahne do|नहीं|ना|रहने दो)\b/.test(
+        normalized,
+      )
+    ) {
       return { cancel: true };
     }
 
     if (
-      /\b(any size|any|you (choose|pick|decide)|whatever|doesn'?t matter|surprise me)\b/.test(
+      /\b(any size|any|you (choose|pick|decide)|whatever|doesn'?t matter|surprise me|koi bhi|jo bhi|aap choose|aap chun lo)\b/.test(
         normalized,
       )
     ) {
@@ -2147,6 +2350,111 @@ export default function AIAssistant() {
     return null;
   };
 
+  // Adds one item to the voice queue (see voiceQueueRef) and kicks off
+  // draining it. Shared by both voice paths - SpeechRecognition (Chrome/
+  // Safari) enqueues already-transcribed text once schedulePauseResponse
+  // decides an utterance is finished, MediaRecorder (Brave) enqueues a raw
+  // audio blob to be transcribed first. Caps how much can pile up if
+  // someone keeps talking through several replies in a row, dropping the
+  // oldest so the assistant catches up on what was said most recently
+  // rather than working through an ever-longer backlog of stale commands.
+  const enqueueVoiceItem = (item) => {
+    if (voiceQueueRef.current.length >= MAX_QUEUED_UTTERANCES) {
+      voiceQueueRef.current.shift();
+    }
+    voiceQueueRef.current.push(item);
+    runVoiceQueue();
+  };
+
+  // Drains voiceQueueRef strictly in arrival order, one utterance at a
+  // time, so replies to a burst of things said in quick succession (or
+  // while a previous reply was still being generated) come back in the
+  // same order they were spoken instead of racing each other. Safe to call
+  // any time something is added to the queue - it's a no-op if a drain is
+  // already running, since that loop will pick up the new item itself.
+  const runVoiceQueue = async () => {
+    if (isProcessingVoiceQueueRef.current) return;
+    isProcessingVoiceQueueRef.current = true;
+
+    try {
+      while (voiceQueueRef.current.length > 0) {
+        if (!listeningSessionRef.current) {
+          voiceQueueRef.current = [];
+          break;
+        }
+
+        const item = voiceQueueRef.current.shift();
+
+        try {
+          let text = item.text;
+
+          if (item.type === "audio") {
+            setStatus("transcribing");
+
+            const formData = new FormData();
+            formData.append(
+              "audio",
+              item.blob,
+              `idris.${getAudioExtension(item.blob.type)}`,
+            );
+
+            const { backendUrl, apiConfigError } = getApiConfig();
+
+            if (!backendUrl) {
+              throw new Error(apiConfigError || "Backend URL is not configured");
+            }
+
+            const response = await fetchWithTimeout(
+              `${backendUrl}/api/voice/transcribe`,
+              {
+                method: "POST",
+                body: formData,
+              },
+              12000,
+            );
+
+            const data = await response.json();
+
+            if (!data.success) {
+              throw new Error(data.message);
+            }
+
+            text = data.transcript.trim();
+          } else {
+            setStatus("thinking");
+          }
+
+          await processVoiceTextRef.current(text);
+
+          // The MediaRecorder path gets this for free every cycle (a fresh
+          // recorder's onstart fires and resets status to "listening"), but
+          // SpeechRecognition in continuous mode doesn't necessarily
+          // restart between utterances - recognition.onstart may simply
+          // never fire again for the rest of the session. Without this,
+          // status stayed on "thinking" forever after a successful reply,
+          // showing that label indefinitely even once genuinely back to
+          // listening (speakText's reply is fired without awaiting, so
+          // isSpeaking - checked first by getStatusText - still correctly
+          // shows "Speaking" for as long as the reply is actually playing).
+          if (listeningSessionRef.current) {
+            setStatus("listening");
+          }
+        } catch /*(error)*/ {
+          setVoiceError(
+            "I could not understand the audio or connect to voice services. You can try again.",
+          );
+          setStatus("error");
+          // Keep draining rather than aborting the whole queue - one bad
+          // item (e.g. a transcribe timeout) shouldn't also swallow replies
+          // to whatever was said after it, and the mic is still listening
+          // in the background regardless.
+        }
+      }
+    } finally {
+      isProcessingVoiceQueueRef.current = false;
+    }
+  };
+
   const startMediaRecorderSession = async () => {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -2166,97 +2474,89 @@ export default function AIAssistant() {
     }
 
     mediaStreamRef.current = stream;
-    vadCleanupRef.current?.();
-    vadCleanupRef.current = startVoiceActivityMonitor(stream);
 
     const mimeType = getSupportedMimeType();
-
     recordingMimeTypeRef.current = mimeType;
 
-    const recorder = new MediaRecorder(
-      stream,
-
-      mimeType ? { mimeType } : undefined,
-    );
-
-    mediaRecorderRef.current = recorder;
-    audioChunksRef.current = [];
-
-    recorder.onstart = () => {
-      setStatus("listening");
-      scheduleSilenceNudge();
-      if (!hasGreetedRef.current) {
-        hasGreetedRef.current = true;
-        speakText(greetingLine);
-      }
-    };
-
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        audioChunksRef.current.push(event.data);
-      }
-    };
-
-    recorder.onstop = async () => {
-      const audioBlob = new Blob(audioChunksRef.current, {
-        type: recordingMimeTypeRef.current || recorder.mimeType || "audio/webm",
-      });
-
-      audioChunksRef.current = [];
-
-      if (!audioBlob.size) {
-        setStatus("error");
+    // Cycles a fresh MediaRecorder over this same mic stream for every
+    // utterance (started here for the first one, then again from onstop
+    // below once each reply is done) instead of tearing the stream down and
+    // calling getUserMedia again per turn - that would re-prompt/flicker the
+    // browser's mic indicator between every exchange in a multi-turn
+    // conversation.
+    const startRecorderCycle = () => {
+      if (!listeningSessionRef.current || voiceModeRef.current !== "media") {
         return;
       }
 
-      try {
-        setStatus("transcribing");
-        let assistantResponse = "";
+      utteranceSpeechDetectedRef.current = false;
 
-        const formData = new FormData();
+      const recorder = new MediaRecorder(
+        stream,
+        mimeType ? { mimeType } : undefined,
+      );
 
-        formData.append(
-          "audio",
-          audioBlob,
-          `idris.${getAudioExtension(audioBlob.type)}`,
-        );
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
 
-        const { backendUrl, apiConfigError } = getApiConfig();
-
-        if (!backendUrl) {
-          throw new Error(apiConfigError || "Backend URL is not configured");
+      recorder.onstart = () => {
+        setStatus("listening");
+        scheduleSilenceNudge();
+        if (!hasGreetedRef.current) {
+          hasGreetedRef.current = true;
+          speakText(greetingLine);
         }
+      };
 
-        const response = await fetchWithTimeout(
-          `${backendUrl}/api/voice/transcribe`,
-          {
-            method: "POST",
-            body: formData,
-          },
-          30000,
-        );
-
-        const data = await response.json();
-
-        if (!data.success) {
-          throw new Error(data.message);
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
         }
+      };
 
-        assistantResponse = await processVoiceTextRef.current(
-          data.transcript.trim(),
-        );
-        if (!assistantResponse) {
-          assistantResponse = "";
-        }
-      } catch /*(error)*/ {
-        setVoiceError(
-          "I could not understand the audio or connect to voice services. You can try again.",
-        );
-        setStatus("error");
-      }
+      recorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, {
+          type: recordingMimeTypeRef.current || recorder.mimeType || "audio/webm",
+        });
+
+        audioChunksRef.current = [];
+
+        // The session was closed while this last cycle's audio was still
+        // being flushed (stopRecording stops the recorder but its onstop
+        // still fires) - nothing left to reply to, so skip everything below
+        // instead of hitting the backend after the widget is already gone.
+        if (!listeningSessionRef.current) return;
+
+        // Start the next cycle right away, in parallel with transcribing/
+        // answering this one below - not after it finishes. Waiting used to
+        // leave the mic completely off for the whole "thinking" round trip,
+        // so anything said in that window was silently lost; when the
+        // assistant's reply finally started, the mic reopening mid-sentence
+        // triggered barge-in and cut it off immediately, then treated
+        // whatever fragment it caught as the next command. Restarting
+        // immediately keeps the mic live the entire time, so nothing said
+        // while a previous command is still being processed gets dropped.
+        startRecorderCycle();
+
+        // Stopped (e.g. by the silence-based auto-stop) before any audio was
+        // actually captured - nothing to send.
+        if (!audioBlob.size) return;
+
+        enqueueVoiceItem({ type: "audio", blob: audioBlob });
+      };
+
+      recorder.start(250);
     };
 
-    recorder.start(250);
+    vadCleanupRef.current?.();
+    vadCleanupRef.current = startVoiceActivityMonitor(stream, () => {
+      const recorder = mediaRecorderRef.current;
+      if (recorder && recorder.state === "recording") {
+        recorder.stop();
+      }
+    });
+
+    startRecorderCycle();
   };
 
   const processVoiceText = async (text) => {
@@ -2495,6 +2795,9 @@ export default function AIAssistant() {
     const recognition = new SpeechRecognition();
     recognition.continuous = true;
     recognition.interimResults = true;
+    // Confirmed-working baseline across Chrome/Safari/Brave - see
+    // recognizedTextBufferRef's declaration for why this stays fixed rather
+    // than trying to switch locale for Hindi.
     recognition.lang = "en-IN";
 
     recognition.onstart = () => {
@@ -2515,8 +2818,17 @@ export default function AIAssistant() {
     };
 
     recognition.onresult = (event) => {
-      clearPauseTimer();
       clearSilenceTimer();
+
+      // See ECHO_GUARD_MS's declaration - discard results that are most
+      // likely the assistant's own voice echoing back through the mic
+      // instead of the customer, rather than treating them as a command.
+      if (
+        isSpeakingRef.current ||
+        Date.now() - lastSpeakEndTimeRef.current < ECHO_GUARD_MS
+      ) {
+        return;
+      }
 
       let finalText = "";
       let interimText = "";
@@ -2534,16 +2846,30 @@ export default function AIAssistant() {
         }
       }
 
-      const currentText = `${finalText}${interimText}`.trim();
-
-      if (currentText) {
-        stopSpeaking();
-        setTranscript(currentText);
-        schedulePauseResponse();
+      // Chrome's recognizer fires a separate final result at every natural
+      // pause even in continuous mode, so a long sentence routinely arrives
+      // as several onresult events ("I want" / "a red shirt") rather than
+      // one. Accumulate finalText here instead of acting on it immediately
+      // - schedulePauseResponse below decides once nothing new has arrived
+      // for a bit that the utterance is actually over, and only then hands
+      // the whole accumulated sentence off to be answered.
+      if (finalText.trim()) {
+        recognizedTextBufferRef.current =
+          `${recognizedTextBufferRef.current} ${finalText.trim()}`.trim();
       }
 
-      if (finalText.trim()) {
-        processVoiceTextRef.current(finalText.trim());
+      const liveText = `${recognizedTextBufferRef.current} ${interimText}`.trim();
+
+      if (liveText) {
+        stopSpeaking();
+        setTranscript(liveText);
+      }
+
+      // Only (re)arm the "utterance is done" debounce once there's at least
+      // one finished segment buffered - interim-only results (still
+      // mid-word) aren't a real pause yet.
+      if (recognizedTextBufferRef.current) {
+        schedulePauseResponse();
       }
     };
 
@@ -2716,6 +3042,7 @@ export default function AIAssistant() {
     try {
       resetVoiceState();
       clearPauseTimer();
+      recognizedTextBufferRef.current = "";
       hadSpeechRef.current = false;
       voiceModeRef.current = isBraveBrowser() ? "media" : "recognition";
       setTranscript("");
@@ -2757,6 +3084,8 @@ export default function AIAssistant() {
     clearPauseTimer();
     clearSilenceTimer();
     silenceNudgeCountRef.current = 0;
+    voiceQueueRef.current = [];
+    recognizedTextBufferRef.current = "";
 
     if (recognitionRef.current) {
       try {

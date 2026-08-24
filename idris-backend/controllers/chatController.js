@@ -4,17 +4,28 @@ import {
   getFirstName,
   buildPersonaPrompt,
   sanitizeHistory,
+  sanitizeMessage,
 } from "../utils/aiChatContext.js";
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
 });
 
+// response.text can legitimately come back empty - a safety filter block,
+// an empty/MAX_TOKENS finish, a transient blank turn - and unlike
+// intentController/transcribeAudio, nothing here previously guarded against
+// that before sending it to the client. Without a fallback the customer
+// would just get a blank/undefined reply rendered in the widget with no
+// indication anything went wrong.
+const FALLBACK_REPLY =
+  "Sorry, I couldn't come up with a reply just now. Please try asking again.";
+
 export const chatBot = async (req, res) => {
   try {
-    const { message, history } = req.body;
+    const message = sanitizeMessage(req.body?.message);
+    const { history } = req.body;
 
-    if (!message || typeof message !== "string") {
+    if (!message) {
       return res.status(400).json({
         success: false,
         message: "Message is required",
@@ -52,11 +63,11 @@ ${message}
 
     res.status(200).json({
       success: true,
-      reply: response.text,
+      reply: response.text?.trim() || FALLBACK_REPLY,
     });
 
   } catch (error) {
-    console.log("Chatbot Error:", error);
+    console.error("Chatbot error:", error);
 
     res.status(500).json({
       success: false,

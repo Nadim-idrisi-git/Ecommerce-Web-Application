@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useContext } from "react";
 import axios from "axios";
 import { ShopContext } from "../context/ShopContext";
+import { getApiConfig } from "../config/api";
 
 const BOT_NAME = "Zara";
 const QUICK_REPLIES = [
@@ -122,7 +123,6 @@ function MessageBubble({ msg }) {
 }
 
 function ChatWindow({ onClose }) {
-  const backendUrl = import.meta.env.VITE_BACKEND_URL;
   const { token } = useContext(ShopContext);
   const isMobile = window.innerWidth <= 768;
   // Hindi is Zara's default/first language (matches the persona rule in
@@ -174,6 +174,12 @@ function ChatWindow({ onClose }) {
       content: msg.text,
     }));
 
+    const { backendUrl, apiConfigError } = getApiConfig();
+
+    if (!backendUrl) {
+      throw new Error(apiConfigError || "Backend URL is not configured");
+    }
+
     const { data } = await axios.post(
       `${backendUrl}/api/chat`,
       {
@@ -183,6 +189,10 @@ function ChatWindow({ onClose }) {
       token ? { headers: { token } } : undefined
     );
 
+    if (!data.success) {
+      throw new Error(data.message || "Chat request failed");
+    }
+
     setTyping(false);
 
     setMessages(prev => [
@@ -190,7 +200,7 @@ function ChatWindow({ onClose }) {
       {
         id: Date.now() + 1,
         role: "bot",
-        text: data.reply
+        text: data.reply || "Sorry, I couldn't come up with a reply just now."
       }
     ]);
 

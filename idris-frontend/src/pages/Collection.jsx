@@ -219,32 +219,38 @@ const Collection = () => {
 
             <p className='flex gap-2'>
               <input
+               id='category-men'
+               name='category'
                className='w-3'
                type="checkbox"
                value={'Men'}
                onChange={toggleCategory}
               />
-              Men
+              <label htmlFor='category-men'>Men</label>
             </p>
 
             <p className='flex gap-2'>
               <input
+               id='category-women'
+               name='category'
                className='w-3'
                type="checkbox"
                value={'Women'}
                onChange={toggleCategory}
               />
-              Women
+              <label htmlFor='category-women'>Women</label>
             </p>
 
             <p className='flex gap-2'>
               <input
+               id='category-kids'
+               name='category'
                className='w-3'
                type="checkbox"
                value={'Kids'}
                onChange={toggleCategory}
               />
-              Kids
+              <label htmlFor='category-kids'>Kids</label>
             </p>
 
           </div>
@@ -264,32 +270,38 @@ const Collection = () => {
 
             <p className='flex gap-2'>
               <input
+               id='subcategory-topwear'
+               name='subCategory'
                className='w-3'
                type="checkbox"
                value={'Topwear'}
                onChange={toggleSubCategory}
               />
-              Topwear
+              <label htmlFor='subcategory-topwear'>Topwear</label>
             </p>
 
             <p className='flex gap-2'>
               <input
+               id='subcategory-bottomwear'
+               name='subCategory'
                className='w-3'
                type="checkbox"
                value={'Bottomwear'}
                onChange={toggleSubCategory}
               />
-              Bottomwear
+              <label htmlFor='subcategory-bottomwear'>Bottomwear</label>
             </p>
 
             <p className='flex gap-2'>
               <input
+               id='subcategory-winterwear'
+               name='subCategory'
                className='w-3'
                type="checkbox"
                value={'Winterwear'}
                onChange={toggleSubCategory}
               />
-              Winterwear
+              <label htmlFor='subcategory-winterwear'>Winterwear</label>
             </p>
 
           </div>

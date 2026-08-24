@@ -30,6 +30,13 @@ const productSchema = new mongoose.Schema({
         type: String,
         required: true
     },
+    // Optional - not required so existing products aren't broken by this
+    // field's addition. Empty means "not set yet" (excluded from color
+    // filter results until an admin sets it), not "colorless".
+    color: {
+        type: String,
+        default: ""
+    },
     size: {
         type: Array,
         required: true

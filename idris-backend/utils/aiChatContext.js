@@ -6,13 +6,37 @@ import userModel from "../models/userModel.js";
 // instead of doubling the DB read, and so the persona/history rules can't
 // drift apart between the two entry points.
 
+// A logged-in customer's first name almost never changes mid-session, but
+// without caching it was a DB round trip on every single chat/voice turn -
+// pure added latency for a value that's essentially static. Keyed per user
+// (unlike the single-entry catalog cache below), so entries are swept
+// periodically rather than left to accumulate forever across every distinct
+// customer the process ever serves.
+const NAME_CACHE_TTL_MS = 5 * 60 * 1000;
+const nameCache = new Map();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, entry] of nameCache) {
+    if (entry.expiresAt <= now) nameCache.delete(userId);
+  }
+}, NAME_CACHE_TTL_MS).unref?.();
+
 const getFirstName = async (userId) => {
   if (!userId) return "";
+
+  const cached = nameCache.get(userId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.name;
+  }
 
   // Only the name field is read - never the full user document (no email,
   // address, cart, password hash, etc. is fetched or sent to the model).
   const user = await userModel.findById(userId).select("name");
-  return user?.name?.trim().split(/\s+/)[0] || "";
+  const name = user?.name?.trim().split(/\s+/)[0] || "";
+
+  nameCache.set(userId, { name, expiresAt: Date.now() + NAME_CACHE_TTL_MS });
+  return name;
 };
 
 // This endpoint is the fallback for open-ended catalog questions that don't
@@ -39,7 +63,7 @@ const getCachedCatalog = async () => {
 
   const products = await productModel
     .find()
-    .select("name price category subCategory size bestseller")
+    .select("name price category subCategory color size bestseller")
     .sort({ bestseller: -1, date: -1 })
     .limit(CATALOG_CONTEXT_LIMIT)
     .lean();
@@ -56,14 +80,24 @@ Store Information:
 - Your name is Zara. Introduce yourself by name only if the customer asks who you are.
 - You help customers with products, sizes, prices, categories, orders, returns and support.
 - Be concise and helpful.
-- Hindi (Devanagari script) is your default/first language. If nothing in the
-  conversation so far indicates otherwise (e.g. this is the customer's first
-  message, or it's language-neutral - just a product name, a number, "yes/no"),
-  reply in Hindi. The moment the customer writes in English or any other
-  language, switch to that language and keep replying in it for the rest of
-  the conversation - never force Hindi once they've shown they're
-  communicating in something else, and never switch back to Hindi on your own
-  once they've moved to another language.
+- You are fully bilingual in Hindi and English, and comfortable with Hinglish
+  (Hindi and English naturally mixed together, in Devanagari or Roman script,
+  the way most customers actually text/speak - e.g. "mujhe black jacket
+  dikhao", "size L available hai kya", "kitne din mein deliver hoga"). Decide
+  the reply language fresh for EACH customer message on its own, based only
+  on that message - not on what language earlier turns in the conversation
+  used:
+  - If the message is a complete, ordinary English sentence with no Hindi
+    words or Hinglish phrasing mixed in at all (e.g. "show me black jacket",
+    "what sizes do you have") - and only then - reply in English.
+  - For everything else - Hindi, Hinglish, or a message that's
+    language-neutral (just a product name, a number, "yes/no", or the
+    customer's very first message with no signal either way) - reply in
+    Hindi or Hinglish. Match the customer's own script/style: reply in
+    Devanagari if they wrote Devanagari, reply in the same natural Roman-
+    script Hinglish mix if that's what they wrote. Never translate a
+    Hinglish message into stiff formal Hindi or into English - a customer
+    who mixes English words into Hindi expects the same natural mix back.
 - Recommend products only from the provided product list.
 - If a product is not available, clearly say it is not available in the current catalog.
 - When recommending products, mention name, category and price if available.
@@ -104,4 +138,23 @@ const sanitizeHistory = (history) => {
     }));
 };
 
-export { getFirstName, getCachedCatalog, buildPersonaPrompt, sanitizeHistory };
+// The customer's own message is the one piece of user input that went
+// straight into the prompt with no length limit at all, unlike every other
+// field here (history, activity, uiContext strings) - an arbitrarily long
+// message would scale both Gemini token cost and prompt-build/response
+// latency directly with whatever the client sent, on an endpoint otherwise
+// only bounded by request *count* (see rateLimit.js), not request size.
+// Clamped rather than rejected, matching how every other input in this file
+// is handled.
+const MAX_MESSAGE_LENGTH = 1000;
+
+const sanitizeMessage = (message) =>
+  typeof message === "string" ? message.trim().slice(0, MAX_MESSAGE_LENGTH) : "";
+
+export {
+  getFirstName,
+  getCachedCatalog,
+  buildPersonaPrompt,
+  sanitizeHistory,
+  sanitizeMessage,
+};
