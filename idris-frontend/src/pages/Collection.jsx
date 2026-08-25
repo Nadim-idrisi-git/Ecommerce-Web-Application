@@ -11,9 +11,20 @@ const Collection = () => {
 
   const [showFilter,setShowFilter] = useState(false)
   const [filterProducts,setFilterProducts] = useState([])
+  const [gender,setGender] = useState([])
   const [category,setCategory] = useState([])
-  const [subCategory,setSubCategory] = useState([])
   const [sortType,setSortType] = useState('relevant')
+
+
+  const toggleGender = (e) => {
+
+    if(gender.includes(e.target.value)){
+      setGender(prev => prev.filter(item => item !== e.target.value))
+    }
+    else{
+      setGender(prev => [...prev,e.target.value])
+    }
+  }
 
 
   const toggleCategory = (e) => {
@@ -23,17 +34,6 @@ const Collection = () => {
     }
     else{
       setCategory(prev => [...prev,e.target.value])
-    }
-  }
-
-
-  const toggleSubCategory = (e) => {
-
-    if(subCategory.includes(e.target.value)){
-      setSubCategory(prev => prev.filter(item => item !== e.target.value))
-    }
-    else{
-      setSubCategory(prev => [...prev,e.target.value])
     }
 
   }
@@ -74,8 +74,9 @@ const Collection = () => {
       const searchableText = [
         item.name,
         item.description,
+        item.gender,
         item.category,
-        item.subCategory,
+        item.productType,
       ]
         .filter(Boolean)
         .join(" ")
@@ -88,20 +89,20 @@ const Collection = () => {
   }
 
   // --------------------------------
+  // NORMAL GENDER FILTER
+  // --------------------------------
+  if (gender.length > 0) {
+    productsCopy = productsCopy.filter((item) =>
+      gender.includes(item.gender)
+    );
+  }
+
+  // --------------------------------
   // NORMAL CATEGORY FILTER
   // --------------------------------
   if (category.length > 0) {
     productsCopy = productsCopy.filter((item) =>
       category.includes(item.category)
-    );
-  }
-
-  // --------------------------------
-  // NORMAL SUBCATEGORY FILTER
-  // --------------------------------
-  if (subCategory.length > 0) {
-    productsCopy = productsCopy.filter((item) =>
-      subCategory.includes(item.subCategory)
     );
   }
 
@@ -164,8 +165,8 @@ const Collection = () => {
   useEffect(() => {
   applyFilter();
 }, [
+  gender,
   category,
-  subCategory,
   search,
   showSearch,
   products,
@@ -207,7 +208,7 @@ const Collection = () => {
         </p>
 
 
-        {/* Category Filter */}
+        {/* Gender Filter */}
 
         <div className={`border border-gray-300 pl-5 py-3 mt-6 ${showFilter ? '' : 'hidden'} sm:block`}>
 
@@ -219,38 +220,38 @@ const Collection = () => {
 
             <p className='flex gap-2'>
               <input
-               id='category-men'
-               name='category'
+               id='gender-men'
+               name='gender'
                className='w-3'
                type="checkbox"
                value={'Men'}
-               onChange={toggleCategory}
+               onChange={toggleGender}
               />
-              <label htmlFor='category-men'>Men</label>
+              <label htmlFor='gender-men'>Men</label>
             </p>
 
             <p className='flex gap-2'>
               <input
-               id='category-women'
-               name='category'
+               id='gender-women'
+               name='gender'
                className='w-3'
                type="checkbox"
                value={'Women'}
-               onChange={toggleCategory}
+               onChange={toggleGender}
               />
-              <label htmlFor='category-women'>Women</label>
+              <label htmlFor='gender-women'>Women</label>
             </p>
 
             <p className='flex gap-2'>
               <input
-               id='category-kids'
-               name='category'
+               id='gender-kids'
+               name='gender'
                className='w-3'
                type="checkbox"
                value={'Kids'}
-               onChange={toggleCategory}
+               onChange={toggleGender}
               />
-              <label htmlFor='category-kids'>Kids</label>
+              <label htmlFor='gender-kids'>Kids</label>
             </p>
 
           </div>
@@ -258,7 +259,7 @@ const Collection = () => {
 
 
 
-        {/* SubCategory Filter */}
+        {/* Category Filter */}
 
         <div className={`border border-gray-300 pl-5 py-3 my-5 ${showFilter ? '' : 'hidden'} sm:block`}>
 
@@ -270,38 +271,38 @@ const Collection = () => {
 
             <p className='flex gap-2'>
               <input
-               id='subcategory-topwear'
-               name='subCategory'
+               id='category-topwear'
+               name='category'
                className='w-3'
                type="checkbox"
                value={'Topwear'}
-               onChange={toggleSubCategory}
+               onChange={toggleCategory}
               />
-              <label htmlFor='subcategory-topwear'>Topwear</label>
+              <label htmlFor='category-topwear'>Topwear</label>
             </p>
 
             <p className='flex gap-2'>
               <input
-               id='subcategory-bottomwear'
-               name='subCategory'
+               id='category-bottomwear'
+               name='category'
                className='w-3'
                type="checkbox"
                value={'Bottomwear'}
-               onChange={toggleSubCategory}
+               onChange={toggleCategory}
               />
-              <label htmlFor='subcategory-bottomwear'>Bottomwear</label>
+              <label htmlFor='category-bottomwear'>Bottomwear</label>
             </p>
 
             <p className='flex gap-2'>
               <input
-               id='subcategory-winterwear'
-               name='subCategory'
+               id='category-winterwear'
+               name='category'
                className='w-3'
                type="checkbox"
                value={'Winterwear'}
-               onChange={toggleSubCategory}
+               onChange={toggleCategory}
               />
-              <label htmlFor='subcategory-winterwear'>Winterwear</label>
+              <label htmlFor='category-winterwear'>Winterwear</label>
             </p>
 
           </div>

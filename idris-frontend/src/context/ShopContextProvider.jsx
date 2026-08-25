@@ -23,6 +23,7 @@ const ShopContextProvider = (props) => {
   const [token, setToken] = useState(localStorage.getItem("token") || "");
     const [voiceSearchFilters, setVoiceSearchFilters] = useState({
   query: "",
+  gender: "",
   category: "",
   color: "",
   maxPrice: null,

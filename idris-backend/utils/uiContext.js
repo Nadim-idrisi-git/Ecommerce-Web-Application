@@ -27,8 +27,8 @@ const clampProduct = (product) => {
   return {
     id,
     name,
+    gender: clampString(product.gender, 50),
     category: clampString(product.category, 50),
-    subCategory: clampString(product.subCategory, 50),
     price: Number.isFinite(price) ? price : null,
     bestseller: Boolean(product.bestseller),
   };

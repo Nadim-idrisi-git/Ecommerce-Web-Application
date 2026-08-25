@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { getApiConfig } from "../config/api";
 import { ShopContext } from "../context/ShopContext";
 import { searchProducts } from "../utils/productSearch";
+import { COLORS } from "../utils/productAttributes";
 
 // A hung request (rather than a fast failure) would otherwise leave the
 // assistant stuck in "thinking"/"transcribing" indefinitely.
@@ -45,8 +46,8 @@ const getPageForPath = (pathname) =>
 const summarizeProductForContext = (product) => ({
   id: product._id,
   name: product.name,
+  gender: product.gender,
   category: product.category,
-  subCategory: product.subCategory,
   price: product.price,
   bestseller: Boolean(product.bestseller),
 });
@@ -72,7 +73,7 @@ const GARMENT_TERM_PATTERNS = [
   { value: "sweater", pattern: /\bsweaters?\b/i },
   { value: "t-shirt", pattern: /\bt-?shirts?\b|\btees?\b/i },
   { value: "shirt", pattern: /\bshirts?\b|\btopwear\b/i },
-  { value: "pant", pattern: /\bpants?\b|\btrousers?\b|\bbottomwear\b/i },
+  { value: "trousers", pattern: /\bpants?\b|\btrousers?\b|\bbottomwear\b/i },
   { value: "dress", pattern: /\bdresses?\b/i },
   { value: "saree", pattern: /\bsarees?\b/i },
 ];
@@ -86,11 +87,6 @@ const detectGarmentCategory = (text) => {
   const hit = GARMENT_TERM_PATTERNS.find(({ pattern }) => pattern.test(text));
   return hit ? hit.value : "";
 };
-
-// Single-slot combined lookup (gender takes priority) for callers that only
-// have room for one category value, e.g. the offline local-fallback search.
-const detectCategoryFromText = (text) =>
-  detectGenderSection(text) || detectGarmentCategory(text);
 
 // "Add the most expensive one to my cart" names a product by superlative,
 // not by name - findProductByQuery (name matching only) can't resolve that,
@@ -1142,31 +1138,17 @@ export default function AIAssistant() {
     const normalized = text.toLowerCase();
     const filters = {
       query: text.trim(),
+      gender: "",
       category: "",
+      productType: "",
       color: "",
       maxPrice: "",
     };
 
-    const colorMap = [
-      "black",
-      "white",
-      "blue",
-      "red",
-      "green",
-      "yellow",
-      "pink",
-      "brown",
-      "grey",
-      "gray",
-      "beige",
-      "navy",
-      "maroon",
-      "olive",
-    ];
+    filters.gender = detectGenderSection(normalized);
+    filters.productType = detectGarmentCategory(normalized);
 
-    filters.category = detectCategoryFromText(normalized);
-
-    const colorHit = colorMap.find((color) => normalized.includes(color));
+    const colorHit = COLORS.find((color) => normalized.includes(color));
     if (colorHit) {
       filters.color = colorHit;
     }
@@ -1225,8 +1207,9 @@ export default function AIAssistant() {
     const scored = productList.map((product) => {
       const haystack = [
         product.name,
+        product.gender,
         product.category,
-        product.subCategory,
+        product.productType,
         product.description,
       ]
         .filter(Boolean)
@@ -1413,7 +1396,9 @@ export default function AIAssistant() {
     const filters = voiceSearchFilters || {};
     const hasFilter = Boolean(
       (filters.query || "").trim() ||
+      filters.gender ||
       filters.category ||
+      filters.productType ||
       filters.color ||
       (filters.maxPrice !== null &&
         filters.maxPrice !== undefined &&
@@ -1610,7 +1595,9 @@ export default function AIAssistant() {
   const respondWithProducts = (matchingProducts, filters, descriptor) => {
     setVoiceSearchFilters({
       query: filters.query || "",
+      gender: filters.gender || "",
       category: filters.category || "",
+      productType: filters.productType || "",
       color: filters.color || "",
       maxPrice: filters.maxPrice || null,
     });
@@ -1679,7 +1666,7 @@ export default function AIAssistant() {
     const genderScopedProducts = resolvedGender
       ? products.filter(
           (product) =>
-            (product.category || "").toLowerCase() === resolvedGender,
+            (product.gender || "").toLowerCase() === resolvedGender,
         )
       : products;
 
@@ -1697,7 +1684,9 @@ export default function AIAssistant() {
     if (garmentCategory || !occasionKeywords.length) {
       const filters = {
         query: "",
-        category: garmentCategory || resolvedGender,
+        gender: resolvedGender,
+        category: "",
+        productType: garmentCategory,
         color: "",
         maxPrice: "",
       };
@@ -1746,7 +1735,7 @@ export default function AIAssistant() {
       return spoken;
     }
 
-    const availableSizes = product.sizes || product.size || [];
+    const availableSizes = product.sizes || [];
     const resolvedSize =
       size || (availableSizes.length ? availableSizes[0] : "");
     const currentQuantity = cartItems?.[productId]?.[resolvedSize] || 0;
@@ -1983,14 +1972,7 @@ export default function AIAssistant() {
         // jackets" is a direct catalog lookup (like typing in the search
         // box), not a personal recommendation, so it's fine to search
         // every section by default.
-        const rawCategory = (args.category || "").toLowerCase();
-        const isGenderArg =
-          rawCategory === "men" ||
-          rawCategory === "women" ||
-          rawCategory === "kids";
-        const explicitGender = isGenderArg
-          ? rawCategory
-          : detectGenderSection(rawText);
+        const explicitGender = (args.gender || "").toLowerCase() || detectGenderSection(rawText);
         const resolvedGender =
           explicitGender || memoryRef.current.lastGenderCategory || "";
 
@@ -2004,13 +1986,15 @@ export default function AIAssistant() {
         const genderScopedProducts = resolvedGender
           ? products.filter(
               (product) =>
-                (product.category || "").toLowerCase() === resolvedGender,
+                (product.gender || "").toLowerCase() === resolvedGender,
             )
           : products;
 
         const filters = {
           query: args.query || rawText,
+          gender: resolvedGender,
           category: args.category || "",
+          productType: args.productType || "",
           color: args.color || "",
           maxPrice: args.maxPrice ?? "",
         };
@@ -2019,7 +2003,9 @@ export default function AIAssistant() {
 
         setVoiceSearchFilters({
           query: filters.query,
+          gender: filters.gender,
           category: filters.category,
+          productType: filters.productType,
           color: filters.color,
           maxPrice: filters.maxPrice || null,
         });
@@ -2140,7 +2126,7 @@ export default function AIAssistant() {
           return spoken;
         }
 
-        const availableSizes = product.sizes || product.size || [];
+        const availableSizes = product.sizes || [];
         const requestedSize = (args.size || "").trim();
 
         if (requestedSize) {
@@ -2596,7 +2582,7 @@ export default function AIAssistant() {
         // local fallback like any other utterance.
       } else if (pending.type === "add_to_cart_size") {
         const product = products.find((item) => item._id === pending.productId);
-        const availableSizes = product?.sizes || product?.size || [];
+        const availableSizes = product?.sizes || [];
         const parsed = parseSizeAnswer(normalizedText, availableSizes);
 
         pendingActionRef.current = null;

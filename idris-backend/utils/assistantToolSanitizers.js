@@ -1,9 +1,13 @@
 import {
   NAVIGATE_DESTINATIONS,
-  PRODUCT_CATEGORIES,
-  PRODUCT_COLORS,
-  SORT_OPTIONS,
 } from "./assistantTools.js";
+import {
+  GENDERS,
+  CATEGORIES,
+  PRODUCT_TYPES,
+  COLORS as PRODUCT_COLORS,
+  SORT_OPTIONS,
+} from "./productAttributes.js";
 
 // Never trust the model's function-call arguments as-is, even though the
 // tool schema already constrains them - re-check every value on the backend.
@@ -26,7 +30,9 @@ export const assistantToolSanitizers = {
     const maxPriceNumber = Number(args.maxPrice);
     return {
       query: asString(args.query).slice(0, 200),
-      category: asEnum(args.category, PRODUCT_CATEGORIES),
+      gender: asEnum(args.gender, GENDERS),
+      category: asEnum(args.category, CATEGORIES),
+      productType: asEnum(args.productType, PRODUCT_TYPES),
       color: asEnum(args.color, PRODUCT_COLORS),
       maxPrice: Number.isFinite(maxPriceNumber) && maxPriceNumber >= 0 ? maxPriceNumber : null,
       sortBy: asEnum(args.sortBy, SORT_OPTIONS),

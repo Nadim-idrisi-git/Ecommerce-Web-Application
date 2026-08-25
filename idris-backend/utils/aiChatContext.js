@@ -63,7 +63,7 @@ const getCachedCatalog = async () => {
 
   const products = await productModel
     .find()
-    .select("name price category subCategory color size bestseller")
+    .select("name price gender category productType color sizes material fit bestseller")
     .sort({ bestseller: -1, date: -1 })
     .limit(CATALOG_CONTEXT_LIMIT)
     .lean();

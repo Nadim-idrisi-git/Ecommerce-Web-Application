@@ -3,6 +3,38 @@ import axios from "axios";
 import { toast } from "react-toastify";
 import { backendUrl } from "../App";
 import ColorCombobox from "../components/ColorCombobox";
+import {
+  GENDERS,
+  CATEGORIES,
+  PRODUCT_TYPES,
+  MATERIALS,
+  FITS,
+  PATTERNS,
+  OCCASIONS,
+  SEASONS,
+  STYLES,
+  SIZES,
+  COLORS,
+} from "../constants/productOptions";
+
+const emptyEditData = {
+  name: "",
+  description: "",
+  price: "",
+  gender: "Men",
+  category: "Topwear",
+  productType: "",
+  color: "",
+  bestseller: false,
+  sizes: [],
+  material: "",
+  fit: "",
+  pattern: "",
+  occasions: [],
+  seasons: [],
+  style: [],
+  features: "",
+};
 
 const List = ({ token }) => {
   const [products, setProducts] = useState([]);
@@ -10,74 +42,7 @@ const List = ({ token }) => {
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [editMode, setEditMode] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [editData, setEditData] = useState({
-    name: "",
-    description: "",
-    price: "",
-    category: "Men",
-    subCategory: "Topwear",
-    color: "",
-    bestseller: false,
-    size: [],
-  });
-
-  const productSizes = ["S", "M", "L", "XL", "XXL"];
-  // Fixed palette (matches Add.jsx, the storefront's color filter, and the
-  // AI assistant's color-search enum).
-  const productColors = [
-    "Black",
-    "White",
-    "Blue",
-    "Red",
-    "Green",
-    "Yellow",
-    "Pink",
-    "Brown",
-    "Grey",
-    "Beige",
-    "Navy",
-    "Maroon",
-    "Olive",
-    "Orange",
-    "Purple",
-    "Lavender",
-    "Violet",
-    "Magenta",
-    "Cyan",
-    "Turquoise",
-    "Teal",
-    "Mint",
-    "Lime",
-    "Sky Blue",
-    "Royal Blue",
-    "Light Blue",
-    "Dark Blue",
-    "Light Green",
-    "Dark Green",
-    "Bottle Green",
-    "Forest Green",
-    "Mustard",
-    "Cream",
-    "Ivory",
-    "Off White",
-    "Khaki",
-    "Tan",
-    "Camel",
-    "Rust",
-    "Coral",
-    "Peach",
-    "Wine",
-    "Burgundy",
-    "Plum",
-    "Mauve",
-    "Rose",
-    "Gold",
-    "Silver",
-    "Bronze",
-    "Charcoal",
-    "Ash",
-    "Nude",
-  ];
+  const [editData, setEditData] = useState(emptyEditData);
 
   const getImageUrl = (image) => {
     if (!image) return "";
@@ -91,11 +56,19 @@ const List = ({ token }) => {
       name: product.name || "",
       description: product.description || "",
       price: product.price || "",
-      category: product.category || "Men",
-      subCategory: product.subCategory || "Topwear",
+      gender: product.gender || "Men",
+      category: product.category || "Topwear",
+      productType: product.productType || "",
       color: product.color || "",
       bestseller: Boolean(product.bestseller),
-      size: product.size || [],
+      sizes: product.sizes || [],
+      material: product.material || "",
+      fit: product.fit || "",
+      pattern: product.pattern || "",
+      occasions: product.occasions || [],
+      seasons: product.seasons || [],
+      style: product.style || [],
+      features: (product.features || []).join(", "),
     });
   };
 
@@ -153,6 +126,7 @@ const List = ({ token }) => {
         {
           id: selectedProduct._id,
           ...editData,
+          features: editData.features.split(",").map((item) => item.trim()).filter(Boolean),
         },
         { headers: { token } },
       );
@@ -178,12 +152,12 @@ const List = ({ token }) => {
     }
   };
 
-  const toggleSize = (productSize) => {
+  const toggleListValue = (field, value) => {
     setEditData((prev) => ({
       ...prev,
-      size: prev.size.includes(productSize)
-        ? prev.size.filter((item) => item !== productSize)
-        : [...prev.size, productSize],
+      [field]: prev[field].includes(value)
+        ? prev[field].filter((item) => item !== value)
+        : [...prev[field], value],
     }));
   };
 
@@ -241,7 +215,7 @@ const List = ({ token }) => {
                   {product.name}
                 </p>
                 <p className="md:hidden text-xs text-gray-500 mt-1">
-                  {product.category} / {product.subCategory}
+                  {product.gender} / {product.category}
                 </p>
                 <p className="md:hidden text-xs text-gray-500 mt-1">
                   ${product.price}
@@ -249,7 +223,7 @@ const List = ({ token }) => {
               </div>
 
               <p className="hidden md:block text-gray-700">
-                {product.category} / {product.subCategory}
+                {product.gender} / {product.category}
               </p>
               <p className="hidden md:block text-gray-700">${product.price}</p>
 
@@ -278,7 +252,7 @@ const List = ({ token }) => {
                   {editMode ? "Edit Product" : selectedProduct.name}
                 </p>
                 <p className="text-xs text-gray-500 mt-1">
-                  {selectedProduct.category} / {selectedProduct.subCategory}
+                  {selectedProduct.gender} / {selectedProduct.category}
                 </p>
               </div>
               <button
@@ -318,15 +292,21 @@ const List = ({ token }) => {
                     </p>
                   </div>
                   <div>
+                    <p className="text-gray-500">Gender</p>
+                    <p className="font-medium text-gray-800 mt-1">
+                      {selectedProduct.gender}
+                    </p>
+                  </div>
+                  <div>
                     <p className="text-gray-500">Category</p>
                     <p className="font-medium text-gray-800 mt-1">
                       {selectedProduct.category}
                     </p>
                   </div>
                   <div>
-                    <p className="text-gray-500">Sub category</p>
+                    <p className="text-gray-500">Product type</p>
                     <p className="font-medium text-gray-800 mt-1">
-                      {selectedProduct.subCategory}
+                      {selectedProduct.productType || "Not set"}
                     </p>
                   </div>
                   <div>
@@ -338,7 +318,49 @@ const List = ({ token }) => {
                   <div>
                     <p className="text-gray-500">Sizes</p>
                     <p className="font-medium text-gray-800 mt-1">
-                      {selectedProduct.size?.join(", ") || "No sizes"}
+                      {selectedProduct.sizes?.join(", ") || "No sizes"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500">Material</p>
+                    <p className="font-medium text-gray-800 mt-1">
+                      {selectedProduct.material || "Not set"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500">Fit</p>
+                    <p className="font-medium text-gray-800 mt-1">
+                      {selectedProduct.fit || "Not set"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500">Pattern</p>
+                    <p className="font-medium text-gray-800 mt-1">
+                      {selectedProduct.pattern || "Not set"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500">Occasions</p>
+                    <p className="font-medium text-gray-800 mt-1">
+                      {selectedProduct.occasions?.join(", ") || "Not set"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500">Seasons</p>
+                    <p className="font-medium text-gray-800 mt-1">
+                      {selectedProduct.seasons?.join(", ") || "Not set"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500">Style</p>
+                    <p className="font-medium text-gray-800 mt-1">
+                      {selectedProduct.style?.join(", ") || "Not set"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500">Features</p>
+                    <p className="font-medium text-gray-800 mt-1">
+                      {selectedProduct.features?.join(", ") || "Not set"}
                     </p>
                   </div>
                   <div>
@@ -406,7 +428,25 @@ const List = ({ token }) => {
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                   <div>
-                    <p className="mb-2">Product category</p>
+                    <p className="mb-2">Gender</p>
+                    <select
+                      value={editData.gender}
+                      onChange={(e) =>
+                        setEditData((prev) => ({
+                          ...prev,
+                          gender: e.target.value,
+                        }))
+                      }
+                      className="w-full border border-gray-300 px-3 py-2"
+                    >
+                      {GENDERS.map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <p className="mb-2">Category</p>
                     <select
                       value={editData.category}
                       onChange={(e) =>
@@ -417,27 +457,9 @@ const List = ({ token }) => {
                       }
                       className="w-full border border-gray-300 px-3 py-2"
                     >
-                      <option value="Men">Men</option>
-                      <option value="Women">Women</option>
-                      <option value="Kids">Kids</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <p className="mb-2">Sub category</p>
-                    <select
-                      value={editData.subCategory}
-                      onChange={(e) =>
-                        setEditData((prev) => ({
-                          ...prev,
-                          subCategory: e.target.value,
-                        }))
-                      }
-                      className="w-full border border-gray-300 px-3 py-2"
-                    >
-                      <option value="Topwear">Topwear</option>
-                      <option value="Bottomwear">Bottomwear</option>
-                      <option value="Winterwear">Winterwear</option>
+                      {CATEGORIES.map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
                     </select>
                   </div>
 
@@ -451,7 +473,7 @@ const List = ({ token }) => {
                           color: nextColor,
                         }))
                       }
-                      options={productColors}
+                      options={COLORS}
                       placeholder="Select or type a color"
                     />
                   </div>
@@ -473,20 +495,127 @@ const List = ({ token }) => {
                   </div>
                 </div>
 
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  <div>
+                    <p className="mb-2">Product Type</p>
+                    <ColorCombobox
+                      value={editData.productType}
+                      onChange={(value) =>
+                        setEditData((prev) => ({ ...prev, productType: value }))
+                      }
+                      options={PRODUCT_TYPES}
+                      placeholder="e.g. T-Shirt"
+                    />
+                  </div>
+                  <div>
+                    <p className="mb-2">Material</p>
+                    <ColorCombobox
+                      value={editData.material}
+                      onChange={(value) =>
+                        setEditData((prev) => ({ ...prev, material: value }))
+                      }
+                      options={MATERIALS}
+                      placeholder="e.g. Cotton"
+                    />
+                  </div>
+                  <div>
+                    <p className="mb-2">Fit</p>
+                    <ColorCombobox
+                      value={editData.fit}
+                      onChange={(value) =>
+                        setEditData((prev) => ({ ...prev, fit: value }))
+                      }
+                      options={FITS}
+                      placeholder="e.g. Regular"
+                    />
+                  </div>
+                  <div>
+                    <p className="mb-2">Pattern</p>
+                    <ColorCombobox
+                      value={editData.pattern}
+                      onChange={(value) =>
+                        setEditData((prev) => ({ ...prev, pattern: value }))
+                      }
+                      options={PATTERNS}
+                      placeholder="e.g. Solid"
+                    />
+                  </div>
+                </div>
+
                 <div>
                   <p className="mb-2">Product Sizes</p>
                   <div className="flex flex-wrap gap-3">
-                    {productSizes.map((productSize) => (
+                    {SIZES.map((productSize) => (
                       <button
                         key={productSize}
-                        onClick={() => toggleSize(productSize)}
-                        className={`px-3 py-1 ${editData.size.includes(productSize) ? "bg-black text-white" : "bg-slate-200"}`}
+                        onClick={() => toggleListValue("sizes", productSize)}
+                        className={`px-3 py-1 ${editData.sizes.includes(productSize) ? "bg-black text-white" : "bg-slate-200"}`}
                         type="button"
                       >
                         {productSize}
                       </button>
                     ))}
                   </div>
+                </div>
+
+                <div>
+                  <p className="mb-2">Occasions</p>
+                  <div className="flex flex-wrap gap-3">
+                    {OCCASIONS.map((option) => (
+                      <button
+                        key={option}
+                        onClick={() => toggleListValue("occasions", option)}
+                        className={`px-3 py-1 text-sm ${editData.occasions.includes(option) ? "bg-black text-white" : "bg-slate-200"}`}
+                        type="button"
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <p className="mb-2">Seasons</p>
+                  <div className="flex flex-wrap gap-3">
+                    {SEASONS.map((option) => (
+                      <button
+                        key={option}
+                        onClick={() => toggleListValue("seasons", option)}
+                        className={`px-3 py-1 text-sm ${editData.seasons.includes(option) ? "bg-black text-white" : "bg-slate-200"}`}
+                        type="button"
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <p className="mb-2">Style</p>
+                  <div className="flex flex-wrap gap-3">
+                    {STYLES.map((option) => (
+                      <button
+                        key={option}
+                        onClick={() => toggleListValue("style", option)}
+                        className={`px-3 py-1 text-sm ${editData.style.includes(option) ? "bg-black text-white" : "bg-slate-200"}`}
+                        type="button"
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <p className="mb-2">Features</p>
+                  <input
+                    value={editData.features}
+                    onChange={(e) =>
+                      setEditData((prev) => ({ ...prev, features: e.target.value }))
+                    }
+                    className="w-full border border-gray-300 px-3 py-2"
+                    placeholder="Comma-separated, e.g. Lightweight, Breathable, Soft Fabric"
+                  />
                 </div>
 
                 <div className="flex items-center gap-2">

@@ -9,34 +9,20 @@
 // a keyword nothing matches simply contributes nothing, rather than
 // excluding everything.
 
-// category/subCategory/color are controlled facet values (Men/Women/Kids,
-// Topwear/Bottomwear/Winterwear, and the fixed color palette products are
-// tagged with - see the admin's color dropdown), not free text - they need
-// an exact match against the product's actual field, not a substring scan.
-// Folding them into the same haystack as name/description used to mean
-// "men" scored a hit on any "Women" product too, since the substring "men"
-// literally appears inside "women" (wo-MEN).
+import { GENDERS, CATEGORIES, PRODUCT_TYPES, COLORS } from "./productAttributes";
+
+// gender/category/productType/color are controlled facet values (Men/Women/
+// Kids, Topwear/Bottomwear/Winterwear, T-Shirt/Jacket/..., and the fixed
+// color palette products are tagged with - see the admin's dropdowns), not
+// free text - they need an exact match against the product's actual field,
+// not a substring scan. Folding them into the same haystack as name/
+// description used to mean "men" scored a hit on any "Women" product too,
+// since the substring "men" literally appears inside "women" (wo-MEN).
 const STRUCTURED_FACET_VALUES = new Set([
-  "men",
-  "women",
-  "kids",
-  "topwear",
-  "bottomwear",
-  "winterwear",
-  "black",
-  "white",
-  "blue",
-  "red",
-  "green",
-  "yellow",
-  "pink",
-  "brown",
-  "grey",
-  "gray",
-  "beige",
-  "navy",
-  "maroon",
-  "olive",
+  ...GENDERS,
+  ...CATEGORIES,
+  ...PRODUCT_TYPES,
+  ...COLORS,
 ]);
 
 // "grey"/"gray" are the same color under two spellings - products are
@@ -56,7 +42,9 @@ const productHaystack = (product) =>
 export const buildSearchKeywords = (filters = {}) => {
   const words = [
     ...(filters.query || "").toLowerCase().split(/\s+/),
+    filters.gender,
     filters.category,
+    filters.productType,
     filters.color,
   ]
     .filter(Boolean)
@@ -69,8 +57,9 @@ export const buildSearchKeywords = (filters = {}) => {
 export const scoreProducts = (products, keywords) =>
   products.map((product) => {
     const haystack = productHaystack(product);
+    const gender = (product.gender || "").toLowerCase();
     const category = (product.category || "").toLowerCase();
-    const subCategory = (product.subCategory || "").toLowerCase();
+    const productType = (product.productType || "").toLowerCase();
     const color = normalizeColor(product.color);
 
     const score = keywords.reduce((total, word) => {
@@ -78,8 +67,9 @@ export const scoreProducts = (products, keywords) =>
         const normalizedWord = normalizeColor(word);
         return (
           total +
-          (word === category ||
-          word === subCategory ||
+          (word === gender ||
+          word === category ||
+          word === productType ||
           (color && normalizedWord === color)
             ? 1
             : 0)

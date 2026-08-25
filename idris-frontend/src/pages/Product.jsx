@@ -265,8 +265,8 @@ const Product = () => {
       </div>
 
       <RelatedProducts
+        gender={productData.gender}
         category={productData.category}
-        subCategory={productData.subCategory}
       />
     </div>
   ) : (

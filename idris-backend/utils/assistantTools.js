@@ -1,4 +1,11 @@
 import { Type } from "@google/genai";
+import {
+  GENDERS,
+  CATEGORIES,
+  PRODUCT_TYPES,
+  COLORS,
+  SORT_OPTIONS,
+} from "./productAttributes.js";
 
 // Single source of truth for what the AI assistant is allowed to do.
 // Gemini can only ever request one of these declared functions - it has no
@@ -23,41 +30,10 @@ export const NAVIGATE_DESTINATIONS = [
   "checkout",
 ];
 
-export const PRODUCT_CATEGORIES = [
-  "men",
-  "women",
-  "jacket",
-  "hoodie",
-  "sweater",
-  "shirt",
-  "t-shirt",
-  "pant",
-  "dress",
-  "saree",
-  "kids",
-  "winterwear",
-  "topwear",
-  "bottomwear",
-];
-
-export const PRODUCT_COLORS = [
-  "black",
-  "white",
-  "blue",
-  "red",
-  "green",
-  "yellow",
-  "pink",
-  "brown",
-  "grey",
-  "gray",
-  "beige",
-  "navy",
-  "maroon",
-  "olive",
-];
-
-export const SORT_OPTIONS = ["low-high", "high-low", "newest", "category", "relevant"];
+// Re-exported so existing importers (assistantToolSanitizers.js) don't need
+// two import sources; productAttributes.js remains the single source of
+// truth these are defined from.
+export { GENDERS, CATEGORIES, PRODUCT_TYPES, COLORS as PRODUCT_COLORS, SORT_OPTIONS };
 
 export const assistantTools = [
   {
@@ -83,8 +59,10 @@ export const assistantTools = [
       type: Type.OBJECT,
       properties: {
         query: { type: Type.STRING, description: "Free-text search terms, e.g. product name or keywords." },
-        category: { type: Type.STRING, enum: PRODUCT_CATEGORIES },
-        color: { type: Type.STRING, enum: PRODUCT_COLORS },
+        gender: { type: Type.STRING, enum: GENDERS, description: "Who the product is for." },
+        category: { type: Type.STRING, enum: CATEGORIES, description: "Garment classification, e.g. topwear." },
+        productType: { type: Type.STRING, enum: PRODUCT_TYPES, description: "Specific garment type, e.g. t-shirt." },
+        color: { type: Type.STRING, enum: COLORS },
         maxPrice: { type: Type.NUMBER, description: "Maximum price the customer is willing to pay." },
         sortBy: { type: Type.STRING, enum: SORT_OPTIONS },
       },

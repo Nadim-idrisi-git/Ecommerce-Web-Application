@@ -2,12 +2,29 @@ import { v2 as cloudinary } from "cloudinary";
 import productModel from "../models/productModel.js";
 import fs from "fs";
 import path from "path";
+import { buildSearchableText } from "../utils/buildSearchableText.js";
+import { inferProductAttributes } from "../utils/inferProductAttributes.js";
+
+const parseArrayField = (value) => {
+    if (Array.isArray(value)) return value;
+    if (typeof value !== "string" || !value.trim()) return [];
+    try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return value.split(",").map((item) => item.trim()).filter(Boolean);
+    }
+};
 
 // function for add product
 
 const addProduct = async (req, res) => {
     try {
-        const { name, description, price, category, subCategory, color, bestseller, size } = req.body;
+        const {
+            name, description, price, gender, category, productType,
+            color, bestseller, sizes, material, fit, pattern,
+            features, occasions, seasons, style,
+        } = req.body;
 
         const image1 = req.files?.image1 && req.files.image1[0];
         const image2 = req.files?.image2 && req.files.image2[0];
@@ -45,13 +62,22 @@ const addProduct = async (req, res) => {
             price: Number(price),
             description,
             images: imageUrls,
+            gender,
             category,
-            subCategory,
-            color: color || "",
-            size: JSON.parse(size),
+            productType: productType || "",
+            color: (color || "").toLowerCase().trim(),
+            sizes: parseArrayField(sizes),
+            material: material || "",
+            fit: fit || "",
+            pattern: pattern || "",
+            features: parseArrayField(features),
+            occasions: parseArrayField(occasions),
+            seasons: parseArrayField(seasons),
+            style: parseArrayField(style),
             bestseller: bestseller === "true" ? true : false,
             date: Date.now()
         };
+        productData.searchableText = buildSearchableText(productData);
 
 
         const product = new productModel(productData);
@@ -108,12 +134,24 @@ const getAssetProducts = () => {
         `return ${productsCode}`
     )(...Object.values(imageImports));
 
-    return assetProducts.map(({ _id, image, sizes, ...product }) => ({
-        assetId: _id,
-        ...product,
-        images: image.map((fileName) => `/assets/${fileName}`),
-        size: sizes,
-    }));
+    return assetProducts.map(({ _id, image, sizes, category, subCategory, ...product }) => {
+        const inferred = inferProductAttributes(product.name);
+        const mapped = {
+            assetId: _id,
+            ...product,
+            images: image.map((fileName) => `/assets/${fileName}`),
+            gender: category,
+            category: subCategory,
+            productType: inferred.productType,
+            material: inferred.material,
+            fit: inferred.fit,
+            pattern: inferred.pattern,
+            color: "",
+            sizes,
+        };
+        mapped.searchableText = buildSearchableText(mapped);
+        return mapped;
+    });
 };
 
 // function for importing products from frontend assets
@@ -159,20 +197,35 @@ const removeProduct = async (req, res) => {
 // function for updating product details
 const updateProduct = async (req, res) => {
     try {
-        const { id, name, description, price, category, subCategory, color, bestseller, size } = req.body;
+        const {
+            id, name, description, price, gender, category, productType,
+            color, bestseller, sizes, material, fit, pattern,
+            features, occasions, seasons, style,
+        } = req.body;
+
+        const update = {
+            name,
+            description,
+            price: Number(price),
+            gender,
+            category,
+            productType: productType || "",
+            color: (color || "").toLowerCase().trim(),
+            bestseller: bestseller === true || bestseller === "true",
+            sizes: parseArrayField(sizes),
+            material: material || "",
+            fit: fit || "",
+            pattern: pattern || "",
+            features: parseArrayField(features),
+            occasions: parseArrayField(occasions),
+            seasons: parseArrayField(seasons),
+            style: parseArrayField(style),
+        };
+        update.searchableText = buildSearchableText(update);
 
         const updatedProduct = await productModel.findByIdAndUpdate(
             id,
-            {
-                name,
-                description,
-                price: Number(price),
-                category,
-                subCategory,
-                color: color || "",
-                bestseller: bestseller === true || bestseller === "true",
-                size: Array.isArray(size) ? size : JSON.parse(size),
-            },
+            update,
             { new: true, runValidators: true }
         );
 
