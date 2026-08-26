@@ -9,22 +9,14 @@ import {
   sanitizeHistory,
   sanitizeMessage,
 } from "../utils/aiChatContext.js";
-import { assistantRag } from "../utils/rag/assistantRag.js";
-import { isRagEligibleTool } from "../utils/rag/ragEligibility.js";
-import { buildShoppingQueryPlan } from "../utils/rag/shoppingQueryPlan.js";
-import { compareProducts } from "../utils/rag/compareProducts.js";
+import { CLARIFY_PREFIX, extractFunctionCall, extractReplyText } from "../utils/geminiResponseParsing.js";
+import { runAgentOrchestrator, isObservableTool } from "../utils/agentOrchestrator.js";
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
 });
 
 const ALLOWED_TOOL_NAMES = new Set(assistantTools.map((tool) => tool.name));
-// Structural marker the model must prefix an ambiguous-reference clarifying
-// question with, and nothing else - lets the response be parsed
-// deterministically into "still needs an answer from the customer" vs "this
-// is the final answer", instead of guessing from free text. See
-// extractReplyText/replyType below.
-const CLARIFY_PREFIX = "CLARIFY:";
 const MAX_ACTIVITY_ENTRIES = 8;
 const MAX_ACTIVITY_ENTRY_LENGTH = 200;
 
@@ -40,16 +32,6 @@ const sanitizeRecentActivity = (activity) => {
     .filter((item) => typeof item === "string" && item.trim())
     .slice(-MAX_ACTIVITY_ENTRIES)
     .map((item) => item.trim().slice(0, MAX_ACTIVITY_ENTRY_LENGTH));
-};
-
-const extractFunctionCall = (response) => {
-  if (response.functionCalls?.length) {
-    return response.functionCalls[0];
-  }
-
-  const parts = response.candidates?.[0]?.content?.parts || [];
-  const part = parts.find((item) => item.functionCall);
-  return part?.functionCall || null;
 };
 
 // search_products already carries sanitized, enum-validated structured
@@ -70,14 +52,6 @@ export const buildRagFiltersForTool = (toolName, sanitizedArgs) => {
     color: sanitizedArgs.color || undefined,
     maxPrice: sanitizedArgs.maxPrice ?? undefined,
   };
-};
-
-const extractReplyText = (response) => {
-  const direct = response.text?.trim();
-  if (direct) return direct;
-
-  const parts = response.candidates?.[0]?.content?.parts || [];
-  return parts.map((part) => part.text || "").join("").trim();
 };
 
 export const detectAIIntent = async (req, res) => {
@@ -227,71 +201,39 @@ ${message}
       const sanitizedArgs = sanitize(call.args || {});
 
       if (sanitizedArgs) {
-        const responsePayload = {
+        // MODULE 14: search_products/recommend_products/compare_products are
+        // the three tools with a real, grounded server-side observation
+        // worth re-planning from - they're handed to the bounded agent
+        // orchestrator (utils/agentOrchestrator.js), which may execute one
+        // or two more dependent tool calls (reusing exactly the same
+        // buildShoppingQueryPlan/assistantRag/compareProducts functions
+        // Modules 7/11/13 already built - nothing duplicated here) before
+        // returning a single final response, in the exact same
+        // {success, tool, arguments, rag?} / {success, tool:null, reply, replyType}
+        // shape this endpoint has always returned. A mutation tool is NEVER
+        // executed there either - see that file's own header comment.
+        //
+        // Every other tool (navigate, sort_products, open_product, the 5
+        // cart/order mutation tools, track_order) returns immediately below,
+        // completely unchanged from Modules 1-13 - zero orchestration
+        // overhead for 7 of the 10 tools.
+        if (isObservableTool(call.name)) {
+          const orchestrated = await runAgentOrchestrator({
+            tool: call.name,
+            args: sanitizedArgs,
+            message,
+            history,
+            uiContext: safeUIContext,
+            buildRagFiltersForTool,
+          });
+          return res.json(orchestrated);
+        }
+
+        return res.json({
           success: true,
           tool: call.name,
           arguments: sanitizedArgs,
-        };
-
-        // Purely additive: the existing tool/arguments contract above is
-        // returned completely unchanged in every case (chat/voice keep
-        // working exactly as before, tool-first behavior is fully
-        // preserved). RAG only ever adds an extra `rag` field, and only
-        // for the two intents that mean semantic product discovery - see
-        // utils/rag/ragEligibility.js. A RAG failure here is swallowed
-        // (logged, not thrown) so it can never break the tool response the
-        // frontend already depends on.
-        // MODULE 13: compare_products is a structurally different flow from
-        // search/recommend (a direct id-based product lookup, not a query
-        // retrieval) - it gets its own branch rather than being folded into
-        // isRagEligibleTool, whose own scope is explicitly the two
-        // retrieval-shaped tools. Same swallow-on-failure discipline as the
-        // RAG branch below: a comparison failure never breaks the tool
-        // response the frontend already depends on.
-        if (call.name === "compare_products") {
-          try {
-            responsePayload.rag = await compareProducts({
-              productIds: sanitizedArgs.productIds,
-              originalQuery: sanitizedArgs.query || message,
-            });
-          } catch (error) {
-            console.error("Comparison integration failed (tool response still returned):", error.message);
-          }
-        } else if (isRagEligibleTool(call.name)) {
-          try {
-            // MODULE 11: the canonical shopping query plan - a deterministic
-            // parse of the customer's own words (this message + prior user
-            // turns in `history`) that is authoritative for hard include/
-            // exclude/price constraints; `sanitizedArgs` (Gemini's own tool
-            // arguments) only ever fills a field the plan couldn't
-            // establish deterministically (e.g. a vague reference Gemini
-            // resolved via uiContext) - see shoppingQueryPlan.js and
-            // assistantRag.js's buildFiltersFromPlan/buildRerankOverridesFromPlan.
-            const plan = buildShoppingQueryPlan({
-              originalQuery: message,
-              toolArguments: sanitizedArgs,
-              history,
-            });
-
-            responsePayload.rag = await assistantRag({
-              query: plan.retrievalQuery,
-              filters: buildRagFiltersForTool(call.name, sanitizedArgs),
-              plan,
-              // MODULE 9: sanitizedArgs.query is Gemini's own tool-extracted
-              // search string and often strips the customer's Hindi/
-              // Hinglish words entirely (e.g. "purple floral top" from
-              // "mujhe purple floral top chahiye") - passing the verbatim
-              // customer message here too lets RAG generation detect/
-              // respond in the language the customer actually used, without
-              // changing what drives retrieval.
-              originalQuery: message,
-            });
-          } catch (error) {
-            console.error("RAG integration failed (tool response still returned):", error.message);
-          }
-        }
-
-        return res.json(responsePayload);
+        });
       }
     }
 
