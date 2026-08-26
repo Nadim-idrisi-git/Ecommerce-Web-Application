@@ -24,13 +24,63 @@ export const PRODUCT_TYPES = [
   "shorts",
   "skirt",
   "kurta",
+  // MODULE 13: verified live against the real catalog (Product.distinct()) -
+  // these are real, currently-stored productType values that were missing
+  // from this vocabulary entirely, so a customer asking for one of them
+  // could never get a hard/deterministic productType match even though
+  // matching products exist.
+  "joggers",
+  "leggings",
+  "tank top",
+  "track pants",
 ];
 
-export const MATERIALS = ["cotton", "pure cotton", "denim", "linen", "wool", "silk", "polyester"];
+export const MATERIALS = [
+  "cotton",
+  "pure cotton",
+  "denim",
+  "linen",
+  "wool",
+  "silk",
+  "polyester",
+  // MODULE 13: verified live against the real catalog - see PRODUCT_TYPES comment above.
+  "cotton blend",
+  "fleece",
+  "rayon",
+];
 
-export const FITS = ["slim", "regular", "relaxed", "tapered", "oversized", "loose"];
+export const FITS = [
+  "slim",
+  "regular",
+  "relaxed",
+  "tapered",
+  "oversized",
+  "loose",
+  // MODULE 13: "Relaxed Fit" is verified to be a REAL, INDEPENDENTLY stored
+  // value distinct from "Relaxed" in this catalog - kept separate rather
+  // than aliased/collapsed together (same principle already established for
+  // "navy" vs "navy blue" - see attributeNormalization.js).
+  "relaxed fit",
+];
 
-export const PATTERNS = ["solid", "striped", "printed", "checked", "floral", "graphic"];
+export const PATTERNS = [
+  "solid",
+  "striped",
+  "printed",
+  "checked",
+  "floral",
+  "graphic",
+  // MODULE 13: verified live against the real catalog. "Graphic Print" is a
+  // real, independently stored value distinct from "Graphic" - kept
+  // separate, not aliased, for the same reason as FITS above.
+  "animal print",
+  "colorblocked",
+  "colourblocked",
+  "graphic print",
+  "ribbed",
+  "typography",
+  "washed",
+];
 
 export const OCCASIONS = ["casual", "daily wear", "college", "work", "formal", "party", "travel"];
 

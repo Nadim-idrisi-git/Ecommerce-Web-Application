@@ -81,6 +81,27 @@ export const assistantTools = [
     },
   },
   {
+    name: "compare_products",
+    description:
+      "Compare 2 or more specific products the customer wants to compare (e.g. 'compare these two', 'which one is better', 'first aur second mein kya difference hai', 'compare the black one and the blue one'). Read-only - never modifies cart, orders, wishlist, or product data.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        productIds: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description:
+            "The ids of the 2+ products to compare, resolved from visibleProducts/selectedProduct in the UI context the same way you resolve a single product id for open_product/add_to_cart. Only call this tool when you can confidently identify at least two distinct products this way - never guess which products the customer means.",
+        },
+        query: {
+          type: Type.STRING,
+          description: "The customer's comparison question or use-case, e.g. 'which is better for winter'.",
+        },
+      },
+      required: ["productIds"],
+    },
+  },
+  {
     name: "sort_products",
     description: "Re-sort the product list currently shown to the customer.",
     parameters: {

@@ -71,7 +71,9 @@ export const buildRelaxationInstruction = (relaxed, responseLanguage) => {
   return template(Number(relaxed.requestedValue));
 };
 
-const isValidCandidate = (candidate) =>
+// Exported so generateComparisonAnswer.js (MODULE 13) can reuse the exact
+// same malformed-candidate check instead of duplicating it.
+export const isValidCandidate = (candidate) =>
   Boolean(
     candidate &&
     typeof candidate === "object" &&

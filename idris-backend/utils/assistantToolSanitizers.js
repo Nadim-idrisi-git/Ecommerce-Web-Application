@@ -8,6 +8,13 @@ import {
   COLORS as PRODUCT_COLORS,
   SORT_OPTIONS,
 } from "./productAttributes.js";
+import { RAG_COMPARISON_MAX_PRODUCTS } from "./rag/ragComparisonConfig.js";
+
+// Mongo ObjectId shape only - the sole check needed to guarantee a
+// compare_products argument can never carry a Mongo operator, arbitrary
+// field name, or injection string ("$where", "__proto__", "constructor",
+// etc. all fail this and are silently dropped, never reaching a query).
+const OBJECT_ID_PATTERN = /^[a-f0-9]{24}$/i;
 
 // Never trust the model's function-call arguments as-is, even though the
 // tool schema already constrains them - re-check every value on the backend.
@@ -43,6 +50,26 @@ export const assistantToolSanitizers = {
     const query = asString(args.query).slice(0, 200);
     if (!query) return null;
     return { query };
+  },
+
+  // Never returns null even when fewer than 2 ids survive sanitization -
+  // compareProducts.js (utils/rag/compareProducts.js) is the single place
+  // that enforces the "at least 2" business rule, and it does so by
+  // returning a real deterministic clarification answer. Rejecting here
+  // instead would make sanitizedArgs falsy in intentController.js, which
+  // would silently fall through to whatever (likely empty) text Gemini
+  // produced alongside a function call, i.e. a dead reply instead of an
+  // actual clarification reaching the customer.
+  compare_products: (args = {}) => {
+    const rawIds = Array.isArray(args.productIds) ? args.productIds : [];
+    const productIds = [...new Set(
+      rawIds
+        .filter((id) => typeof id === "string")
+        .map((id) => id.trim())
+        .filter((id) => OBJECT_ID_PATTERN.test(id)),
+    )].slice(0, RAG_COMPARISON_MAX_PRODUCTS);
+
+    return { productIds, query: asString(args.query).slice(0, 200) };
   },
 
   sort_products: (args = {}) => {

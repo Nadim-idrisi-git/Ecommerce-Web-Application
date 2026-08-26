@@ -12,6 +12,7 @@ import {
 import { assistantRag } from "../utils/rag/assistantRag.js";
 import { isRagEligibleTool } from "../utils/rag/ragEligibility.js";
 import { buildShoppingQueryPlan } from "../utils/rag/shoppingQueryPlan.js";
+import { compareProducts } from "../utils/rag/compareProducts.js";
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
@@ -175,6 +176,16 @@ when the order is unambiguous (an id from recentOrders, or the customer
 clearly names the one order they mean) - guessing which order is not
 allowed, ask instead.
 
+Comparison rules: only call compare_products when you can confidently
+identify at least two distinct products the customer means, resolved from
+visibleProducts/selectedProduct in the UI context the same way you resolve a
+single product id for open_product/add_to_cart. If it's ambiguous which
+products to compare (e.g. "which one is better?" with several products
+visible, or none clearly named), do NOT call compare_products - instead
+respond with exactly ${CLARIFY_PREFIX} followed by one short clarifying
+question naming the visible options, exactly like the general ambiguous-
+reference rule above. Never guess which two products the customer means.
+
 For any other message that doesn't match a tool and isn't an ambiguous
 reference needing clarification (general questions, greetings, store
 policy, small talk, questions about a product's price/size/availability),
@@ -230,7 +241,23 @@ ${message}
         // utils/rag/ragEligibility.js. A RAG failure here is swallowed
         // (logged, not thrown) so it can never break the tool response the
         // frontend already depends on.
-        if (isRagEligibleTool(call.name)) {
+        // MODULE 13: compare_products is a structurally different flow from
+        // search/recommend (a direct id-based product lookup, not a query
+        // retrieval) - it gets its own branch rather than being folded into
+        // isRagEligibleTool, whose own scope is explicitly the two
+        // retrieval-shaped tools. Same swallow-on-failure discipline as the
+        // RAG branch below: a comparison failure never breaks the tool
+        // response the frontend already depends on.
+        if (call.name === "compare_products") {
+          try {
+            responsePayload.rag = await compareProducts({
+              productIds: sanitizedArgs.productIds,
+              originalQuery: sanitizedArgs.query || message,
+            });
+          } catch (error) {
+            console.error("Comparison integration failed (tool response still returned):", error.message);
+          }
+        } else if (isRagEligibleTool(call.name)) {
           try {
             // MODULE 11: the canonical shopping query plan - a deterministic
             // parse of the customer's own words (this message + prior user

@@ -2168,6 +2168,33 @@ export default function AIAssistant() {
         // to see verbatim.
         return handleRecommendationQuery(rawText);
 
+      // MODULE 13: there is no client-side comparison logic at all (never
+      // existed before this) - the backend's grounded comparison
+      // (utils/rag/compareProducts.js) is the only source of a comparison
+      // answer. respondWithRagResult (module 12) is reused completely
+      // unchanged: it speaks/shows rag.answer and, only when rag.sources
+      // resolved to real cached products, sets them as the visible/
+      // remembered product set so a later "the first one"/"add it" resolves
+      // against the compared products. This also correctly handles the
+      // backend's own deterministic "need at least two products" answer
+      // (grounded:false, sources: []) - it's spoken without touching
+      // whatever the customer was already looking at.
+      case "compare_products": {
+        if (rag) {
+          return respondWithRagResult(
+            rag,
+            { query: rawText, gender: "", category: "", productType: "", color: "", maxPrice: "" },
+            rawText,
+          );
+        }
+
+        const spoken = "I couldn't complete that comparison right now. Please try again.";
+        setCurrentAction("Comparison failed");
+        setAiReply(spoken);
+        speakText(spoken);
+        return spoken;
+      }
+
       case "sort_products": {
         const sortBy = args.sortBy || "relevant";
 
