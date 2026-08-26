@@ -9,6 +9,9 @@ import {
   sanitizeHistory,
   sanitizeMessage,
 } from "../utils/aiChatContext.js";
+import { assistantRag } from "../utils/rag/assistantRag.js";
+import { isRagEligibleTool } from "../utils/rag/ragEligibility.js";
+import { buildShoppingQueryPlan } from "../utils/rag/shoppingQueryPlan.js";
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
@@ -46,6 +49,26 @@ const extractFunctionCall = (response) => {
   const parts = response.candidates?.[0]?.content?.parts || [];
   const part = parts.find((item) => item.functionCall);
   return part?.functionCall || null;
+};
+
+// search_products already carries sanitized, enum-validated structured
+// attributes (utils/assistantToolSanitizers.js) - reused directly as RAG's
+// metadata prefilter rather than re-parsing the customer's message a
+// second time. recommend_products only ever carries a free-text occasion/
+// use-case query (by design - see assistantTools.js), so it has no
+// structured filters to reuse; RAG falls back to pure semantic retrieval
+// for it, which is exactly the intended behavior for a request that can't
+// be mapped to exact filter values.
+export const buildRagFiltersForTool = (toolName, sanitizedArgs) => {
+  if (toolName !== "search_products") return undefined;
+
+  return {
+    gender: sanitizedArgs.gender || undefined,
+    category: sanitizedArgs.category || undefined,
+    productType: sanitizedArgs.productType || undefined,
+    color: sanitizedArgs.color || undefined,
+    maxPrice: sanitizedArgs.maxPrice ?? undefined,
+  };
 };
 
 const extractReplyText = (response) => {
@@ -193,11 +216,55 @@ ${message}
       const sanitizedArgs = sanitize(call.args || {});
 
       if (sanitizedArgs) {
-        return res.json({
+        const responsePayload = {
           success: true,
           tool: call.name,
           arguments: sanitizedArgs,
-        });
+        };
+
+        // Purely additive: the existing tool/arguments contract above is
+        // returned completely unchanged in every case (chat/voice keep
+        // working exactly as before, tool-first behavior is fully
+        // preserved). RAG only ever adds an extra `rag` field, and only
+        // for the two intents that mean semantic product discovery - see
+        // utils/rag/ragEligibility.js. A RAG failure here is swallowed
+        // (logged, not thrown) so it can never break the tool response the
+        // frontend already depends on.
+        if (isRagEligibleTool(call.name)) {
+          try {
+            // MODULE 11: the canonical shopping query plan - a deterministic
+            // parse of the customer's own words (this message + prior user
+            // turns in `history`) that is authoritative for hard include/
+            // exclude/price constraints; `sanitizedArgs` (Gemini's own tool
+            // arguments) only ever fills a field the plan couldn't
+            // establish deterministically (e.g. a vague reference Gemini
+            // resolved via uiContext) - see shoppingQueryPlan.js and
+            // assistantRag.js's buildFiltersFromPlan/buildRerankOverridesFromPlan.
+            const plan = buildShoppingQueryPlan({
+              originalQuery: message,
+              toolArguments: sanitizedArgs,
+              history,
+            });
+
+            responsePayload.rag = await assistantRag({
+              query: plan.retrievalQuery,
+              filters: buildRagFiltersForTool(call.name, sanitizedArgs),
+              plan,
+              // MODULE 9: sanitizedArgs.query is Gemini's own tool-extracted
+              // search string and often strips the customer's Hindi/
+              // Hinglish words entirely (e.g. "purple floral top" from
+              // "mujhe purple floral top chahiye") - passing the verbatim
+              // customer message here too lets RAG generation detect/
+              // respond in the language the customer actually used, without
+              // changing what drives retrieval.
+              originalQuery: message,
+            });
+          } catch (error) {
+            console.error("RAG integration failed (tool response still returned):", error.message);
+          }
+        }
+
+        return res.json(responsePayload);
       }
     }
 

@@ -17,6 +17,7 @@ import {
   SIZES,
   COLORS,
 } from "../constants/productOptions";
+import { parseFeaturesInput } from "../utils/parseFeatures";
 
 const Add = ({ token }) => {
   const [image1, setImage1] = useState(false);
@@ -67,10 +68,7 @@ const Add = ({ token }) => {
       formData.append("material", material);
       formData.append("fit", fit);
       formData.append("pattern", pattern);
-      formData.append(
-        "features",
-        JSON.stringify(features.split(",").map((item) => item.trim()).filter(Boolean)),
-      );
+      formData.append("features", JSON.stringify(parseFeaturesInput(features)));
       formData.append("occasions", JSON.stringify(occasions));
       formData.append("seasons", JSON.stringify(seasons));
       formData.append("style", JSON.stringify(style));

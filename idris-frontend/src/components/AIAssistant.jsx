@@ -1626,6 +1626,74 @@ export default function AIAssistant() {
     return spoken;
   };
 
+  // MODULE 12: the RAG-authoritative counterpart to respondWithProducts()
+  // above - used by search_products/recommend_products whenever the
+  // backend returned a grounded rag result (utils/rag/assistantRag.js),
+  // instead of running the old client-side keyword search
+  // (utils/productSearch.js) or the local recommendation matcher.
+  //
+  // rag.sources only ever carries {sourceId, name, price} (module 6/11's
+  // contract - see generateRagAnswer.js/assistantRag.js) - sourceId is the
+  // product's real Mongo _id (utils/rag/buildRagDocument.js sets
+  // `sourceId: product._id` at index time), so it's resolved back to the
+  // actual cached product object the same way voiceProductIds already does
+  // elsewhere in this file (byId lookup), never trusted or rendered as a
+  // product on its own. A source that can't be resolved (stale local
+  // catalog cache, since RAG always retrieves against the live DB) is
+  // dropped rather than shown as a broken/fake card - see the console.warn
+  // below.
+  const respondWithRagResult = (rag, filters, rawQuery) => {
+    const byId = new Map(products.map((product) => [product._id, product]));
+    const resolvedProducts = (rag.sources || [])
+      .map((source) => byId.get(String(source.sourceId)))
+      .filter(Boolean);
+
+    if (rag.sources?.length && resolvedProducts.length === 0) {
+      // Diagnostic only - never surfaced to the customer. The grounded
+      // text answer below is still shown/spoken regardless, since it's
+      // still an accurate, authoritative answer even if this session's
+      // locally cached product list happens to be stale.
+      console.warn(
+        "RAG returned sources that don't match the locally cached catalog:",
+        rag.sources.map((s) => s.sourceId),
+      );
+    }
+
+    setVoiceSearchFilters({
+      query: filters.query || "",
+      gender: filters.gender || "",
+      category: filters.category || "",
+      productType: filters.productType || "",
+      color: filters.color || "",
+      maxPrice: filters.maxPrice || null,
+    });
+
+    // Only replace what's on screen when there's something real to show -
+    // an empty voiceProductIds array would render as "0 products," which
+    // would misrepresent a genuine grounded answer as a failed search.
+    if (resolvedProducts.length > 0) {
+      setVoiceProductIds(resolvedProducts.map((product) => product._id));
+      setSearch("");
+      setShowSearch(false);
+      navigate("/collection");
+    }
+
+    setCurrentAction(
+      resolvedProducts.length > 0
+        ? `Showing ${resolvedProducts.length} product(s) from grounded search`
+        : "Answered from grounded search",
+    );
+    setAiReply(rag.answer);
+    // Same session memory used everywhere else (resolveProductFromArgs'
+    // callers, follow-up context) - now populated from the actual RAG
+    // result set instead of the client-side search's own guesses, so a
+    // later "the second one"/"cheaper one" resolves against what the
+    // customer was really just shown.
+    rememberSearchContext(filters, resolvedProducts, rawQuery || filters.query);
+    speakText(rag.answer);
+    return rag.answer;
+  };
+
   const handleRecommendationQuery = (text) => {
     const explicitGender = detectGenderSection(text);
     const garmentCategory = detectGarmentCategory(text);
@@ -1939,13 +2007,19 @@ export default function AIAssistant() {
   // human-readable summary of what happened - this is the single choke
   // point all tool executions pass through, so it's also where the session
   // activity log is built for recentActivity (see getAssistantTool).
-  const runTool = (tool, args = {}, rawText = "") => {
-    const spoken = runToolInner(tool, args, rawText);
+  // MODULE 12: `rag` is the backend's optional { answer, grounded, sources,
+  // meta } result (utils/rag/assistantRag.js, via /api/ai/intent) - present
+  // only for search_products/recommend_products, and only when RAG
+  // succeeded. Threaded through so those two cases can use it as the
+  // authoritative response instead of running their own client-side
+  // search/recommendation logic. Every other tool ignores it entirely.
+  const runTool = (tool, args = {}, rawText = "", rag = null) => {
+    const spoken = runToolInner(tool, args, rawText, rag);
     recordActivity(spoken);
     return spoken;
   };
 
-  const runToolInner = (tool, args = {}, rawText = "") => {
+  const runToolInner = (tool, args = {}, rawText = "", rag = null) => {
     setSecurityNotice("");
 
     switch (tool) {
@@ -1999,6 +2073,20 @@ export default function AIAssistant() {
           maxPrice: args.maxPrice ?? "",
         };
 
+        // MODULE 12: the backend already ran the full hybrid RAG pipeline
+        // (canonical shopping plan, hard/soft constraints, exclusions,
+        // grounded generation - utils/rag/assistantRag.js) for this exact
+        // request. When it produced a grounded result, that result is
+        // authoritative - it must win over this component's own client-side
+        // keyword search (utils/productSearch.js) and its generic "I found
+        // N matching products" reply. The client-side search below only
+        // ever runs now as the fallback for when RAG is unavailable/not
+        // grounded (backend error swallowed upstream, or a genuine
+        // no-context case) - see respondWithRagResult's own comment.
+        if (rag && rag.grounded && Array.isArray(rag.sources)) {
+          return respondWithRagResult(rag, filters, filters.query);
+        }
+
         const matchingProducts = searchProducts(genderScopedProducts, filters);
 
         setVoiceSearchFilters({
@@ -2036,6 +2124,43 @@ export default function AIAssistant() {
       }
 
       case "recommend_products":
+        // MODULE 12: same precedence rule as search_products above - a
+        // grounded RAG recommendation (already computed backend-side for
+        // this exact request) wins over the local keyword-based
+        // recommendation matcher. handleRecommendationQuery still owns the
+        // "who are these for?" clarification gate for when RAG has nothing
+        // - once RAG succeeds, the audience question is moot (a grounded
+        // answer was already produced), so it's bypassed rather than asked
+        // redundantly.
+        if (rag && rag.grounded && Array.isArray(rag.sources)) {
+          // Same audience-memory bookkeeping handleRecommendationQuery does
+          // internally - kept consistent here so a LATER turn that falls
+          // back to the local matcher (e.g. a transient RAG failure) still
+          // has the right remembered audience, regardless of which path
+          // handled this turn.
+          const explicitGender =
+            (args.gender || "").toLowerCase() || detectGenderSection(rawText);
+          if (explicitGender) {
+            memoryRef.current = {
+              ...memoryRef.current,
+              lastGenderCategory: explicitGender,
+            };
+          }
+
+          return respondWithRagResult(
+            rag,
+            {
+              query: rawText,
+              gender: explicitGender,
+              category: "",
+              productType: "",
+              color: "",
+              maxPrice: "",
+            },
+            rawText,
+          );
+        }
+
         // rawText (the customer's literal words), not args.query - Gemini's
         // query is paraphrased toward "occasion/use-case" per its schema
         // description and can drop words like "men" entirely, which the
@@ -2721,6 +2846,7 @@ export default function AIAssistant() {
         toolCall.tool,
         toolCall.arguments || {},
         normalizedText,
+        toolCall.rag || null,
       );
     } else if (toolCall?.reply && toolCall.replyType === "clarification") {
       // The model had live UI context but couldn't confidently resolve an

@@ -3,10 +3,19 @@
 // is what a future embedding step would encode - keeping it server-generated
 // (never admin-entered) means it can never drift out of sync with the
 // structured fields it's built from.
+const joinList = (label, list) =>
+  Array.isArray(list) && list.length ? `${label}: ${list.join(", ")}.` : "";
+
+// Built as blank-line-separated sections (name / attribute block /
+// description) rather than a single filter(Boolean)'d line array - an
+// empty string "" used as a blank-line separator is itself falsy, so
+// filtering the whole thing in one flat array would silently swallow the
+// separators along with the genuinely-absent attribute lines.
 export const buildSearchableText = (product) => {
-  const lines = [
-    product.name,
-    "",
+  const name = (product.name || "").trim();
+  const description = (product.description || "").trim();
+
+  const attributeLines = [
     product.gender && `Gender: ${product.gender}.`,
     product.category && `Category: ${product.category}.`,
     product.productType && `Product type: ${product.productType}.`,
@@ -14,14 +23,18 @@ export const buildSearchableText = (product) => {
     product.material && `Material: ${product.material}.`,
     product.fit && `Fit: ${product.fit}.`,
     product.pattern && `Pattern: ${product.pattern}.`,
-    Array.isArray(product.style) && product.style.length && `Style: ${product.style.join(", ")}.`,
-    Array.isArray(product.occasions) && product.occasions.length && `Occasions: ${product.occasions.join(", ")}.`,
-    Array.isArray(product.seasons) && product.seasons.length && `Seasons: ${product.seasons.join(", ")}.`,
-    Array.isArray(product.features) && product.features.length && `Features: ${product.features.join(", ")}.`,
-    "",
-    "Description:",
-    product.description,
+    joinList("Style", product.style),
+    joinList("Occasions", product.occasions),
+    joinList("Seasons", product.seasons),
+    joinList("Features", product.features),
+    joinList("Sizes", product.sizes),
   ].filter(Boolean);
 
-  return lines.join("\n");
+  const sections = [
+    name,
+    attributeLines.join("\n"),
+    description && `Description:\n${description}`,
+  ].filter(Boolean);
+
+  return sections.join("\n\n");
 };

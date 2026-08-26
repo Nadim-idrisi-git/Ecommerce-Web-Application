@@ -16,6 +16,7 @@ import {
   SIZES,
   COLORS,
 } from "../constants/productOptions";
+import { parseFeaturesInput } from "../utils/parseFeatures";
 
 const emptyEditData = {
   name: "",
@@ -126,7 +127,7 @@ const List = ({ token }) => {
         {
           id: selectedProduct._id,
           ...editData,
-          features: editData.features.split(",").map((item) => item.trim()).filter(Boolean),
+          features: parseFeaturesInput(editData.features),
         },
         { headers: { token } },
       );
