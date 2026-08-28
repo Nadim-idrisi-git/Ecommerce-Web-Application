@@ -14,6 +14,7 @@ import {
   toolCallSignature,
   isObservableTool,
   isMutationTool,
+  hasLikelyFollowUpSignal,
   MAX_AGENT_STEPS,
   MAX_TOOL_CALLS,
 } from "../utils/agentOrchestrator.js";
@@ -62,10 +63,16 @@ const scriptedReplan = (decisions) => {
   return fn;
 };
 
+// LATENCY FIX: the default message deliberately contains a follow-up signal
+// word ("cart") so every test below that wants the re-plan loop to actually
+// engage (chaining, mutation hand-off, limits, loop detection) keeps working
+// unchanged - hasLikelyFollowUpSignal's own dedicated tests (further below)
+// cover the skip-when-no-signal behavior explicitly, using their own
+// message override.
 const baseCtx = (overrides = {}) => ({
   tool: "search_products",
   args: { query: "black jacket" },
-  message: "black jacket dikhao",
+  message: "black jacket dikhao aur cart mein add karo",
   history: [],
   uiContext: { page: "collection", visibleProducts: [] },
   buildRagFiltersForTool: passthroughFilters,
@@ -76,7 +83,7 @@ const baseCtx = (overrides = {}) => ({
 // 1. Single-tool passthrough (test 1)
 // ============================================================
 
-await asyncTest("single-tool request (search only, replan says done): shape matches today's exact contract", async () => {
+await asyncTest("single-tool request WITH a follow-up signal (search only, replan says done): shape matches today's exact contract", async () => {
   const rag = ragResult([source(ID_A, "Black Jacket", 999)]);
   const assistantRagFake = async () => rag;
   const replan = scriptedReplan([{ type: "done" }]);
@@ -89,6 +96,49 @@ await asyncTest("single-tool request (search only, replan says done): shape matc
 
   assert.deepEqual(result, { success: true, tool: "search_products", arguments: { query: "black jacket" }, rag });
   assert.equal(replan.calls.length, 1); // exactly one re-plan call attempted
+});
+
+// ============================================================
+// LATENCY FIX — skip the re-plan Gemini call entirely for a plain request
+// with no sign of wanting anything further (Part F still applies: this is
+// decided BEFORE any Gemini call, purely from the customer's own text).
+// ============================================================
+
+await asyncTest("plain single-tool request with NO follow-up signal: the re-plan call is skipped entirely (latency fix)", async () => {
+  const rag = ragResult([source(ID_A, "Black Jacket", 999)]);
+  const assistantRagFake = async () => rag;
+  const replan = scriptedReplan([{ type: "done" }]); // must never even be reached
+
+  const result = await runAgentOrchestrator(
+    baseCtx({ message: "show me black jackets" }),
+    { assistantRag: assistantRagFake, buildShoppingQueryPlan: stubPlan, runReplanStep: replan },
+  );
+
+  assert.deepEqual(result, { success: true, tool: "search_products", arguments: { query: "black jacket" }, rag });
+  assert.equal(replan.calls.length, 0, "no re-plan call should be made when the message shows no sign of a follow-up action");
+});
+
+test("hasLikelyFollowUpSignal: recognizes cart/mutation, comparison, ordinal, and superlative signals across English/Hindi/Hinglish", () => {
+  [
+    "add the cheapest one to my cart",
+    "black jacket dikhao aur cart mein add karo",
+    "compare these two",
+    "dono mein se best batao",
+    "add the second one to cart",
+    "second wale ko cart mein daal do",
+    "which is better for winter",
+    "sasti wali le lo",
+  ].forEach((msg) => assert.equal(hasLikelyFollowUpSignal(msg), true, msg));
+});
+
+test("hasLikelyFollowUpSignal: a plain browse/discovery request has no signal", () => {
+  [
+    "show me black jackets",
+    "mujhe black jacket dikhao",
+    "मुझे काली जैकेट चाहिए",
+    "I want a fleece jacket under 2000",
+    "recommend something for winter",
+  ].forEach((msg) => assert.equal(hasLikelyFollowUpSignal(msg), false, msg));
 });
 
 // ============================================================

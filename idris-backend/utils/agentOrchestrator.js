@@ -28,6 +28,8 @@ import { assistantRag } from "./rag/assistantRag.js";
 import { buildShoppingQueryPlan } from "./rag/shoppingQueryPlan.js";
 import { compareProducts } from "./rag/compareProducts.js";
 import { CLARIFY_PREFIX, extractFunctionCall, extractReplyText } from "./geminiResponseParsing.js";
+import { callGeminiWithRetry } from "./callGeminiWithRetry.js";
+import { logOrchestrationEvent } from "./orchestrationLogger.js";
 
 // Same per-file GoogleGenAI instantiation pattern already used throughout
 // this backend - no shared client module exists.
@@ -60,6 +62,43 @@ const MUTATION_TOOLS = new Set([
 
 export const isObservableTool = (toolName) => OBSERVABLE_TOOLS.has(toolName);
 export const isMutationTool = (toolName) => MUTATION_TOOLS.has(toolName);
+
+// LATENCY FIX: every grounded search/recommend/compare used to pay for one
+// extra re-plan Gemini call even for a plain "show me black jackets" with
+// nothing further to do - measured live at ~2-3s of the ~6-8s total for
+// that dominant case. This is a bounded, deterministic (zero extra Gemini
+// call) pre-check, same style/pattern as negativeIntent.js/priceIntent.js:
+// only attempt re-planning at all when the customer's OWN words already
+// hint at a further action - a mutation, a comparison, an ordinal/
+// superlative reference to something not yet on screen. Deliberately broad/
+// inclusive (English + Hindi + Hinglish) so a genuine multi-step request is
+// never silently downgraded to a single-tool answer - false positives here
+// only cost one extra (already-affordable) Gemini call, never a correctness
+// regression; a false negative would, which is why every one of Module 14's
+// own worked/live-tested multi-step phrasings was checked against this list
+// before it was finalized (see the Module 15 report).
+const FOLLOW_UP_SIGNAL_WORDS = [
+  // cart/order mutation intent
+  "cart", "add", "buy", "order", "purchase", "checkout", "remove", "cancel",
+  "kharido", "khareed", "kharidna", "daal", "jod", "hata",
+  // comparison intent
+  "compare", "comparison", "better", "best", "difference", "vs", "versus",
+  "behtar", "accha", "farak", "kaunsa", "konsa",
+  // ordinal/positional references to something not yet resolved
+  "first", "second", "third", "last", "pehla", "pehli", "doosra", "dusra", "doosri", "teesra",
+  // superlative references (need the actual retrieved data to resolve)
+  "cheapest", "cheaper", "expensive", "costliest", "priciest", "newest",
+  "sasti", "sasta", "mehenga", "mehngi", "sabse",
+  // generic "do it for me" action verbs that imply acting on a result
+  "take", "get it", "get this", "le lo", "le do",
+];
+
+const FOLLOW_UP_SIGNAL_PATTERN = new RegExp(
+  `\\b(?:${FOLLOW_UP_SIGNAL_WORDS.map((w) => w.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")).join("|")})\\b`,
+  "i",
+);
+
+export const hasLikelyFollowUpSignal = (message) => FOLLOW_UP_SIGNAL_PATTERN.test(String(message || ""));
 
 // A stable, order-independent signature for loop detection (Part J) - two
 // calls to the same tool with the same (possibly differently-ordered)
@@ -154,7 +193,13 @@ ${message}
 // One re-plan Gemini call -> a discriminated decision. `generateContent` is
 // an internal testing seam ONLY (same convention as generateRagAnswer.js) -
 // defaults to the real Gemini call.
-export const runReplanStep = async (promptContext, generateContent = (params) => ai.models.generateContent(params)) => {
+// MODULE 15: bounded timeout + single transient-only retry - see
+// callGeminiWithRetry.js's own header. Never used by a test - every test
+// supplies its own generateContent, bypassing this default entirely.
+export const runReplanStep = async (
+  promptContext,
+  generateContent = (params) => callGeminiWithRetry(() => ai.models.generateContent(params)),
+) => {
   const promptText = buildReplanPrompt(promptContext);
 
   const response = await generateContent({
@@ -226,11 +271,14 @@ export const runAgentOrchestrator = async (
   let lastArgs = args;
   seenSignatures.add(toolCallSignature(lastTool, lastArgs));
 
+  logOrchestrationEvent("orchestration_start", { tool: lastTool });
+
   let lastResult;
   try {
     lastResult = await executeObservableTool(lastTool, lastArgs, ctx, deps);
   } catch (error) {
     console.error("agentOrchestrator: initial tool execution failed:", error.message);
+    logOrchestrationEvent("tool_execution_failed", { tool: lastTool, step: 0 });
     // Same swallow-and-return-the-tool-response-without-rag discipline the
     // pre-Module-14 code already used for a RAG/comparison failure.
     return { success: true, tool: lastTool, arguments: lastArgs };
@@ -239,12 +287,33 @@ export const runAgentOrchestrator = async (
 
   let step = 1;
   let toolCallCount = 1;
+  let terminationReason = "loop_exhausted";
+
+  logOrchestrationEvent("tool_executed", {
+    tool: lastTool, step, toolCallCount, grounded: lastResult.grounded, sourceCount: (lastResult.sources || []).length,
+  });
+
+  if (!lastResult.grounded) {
+    terminationReason = "ungrounded";
+  }
+
+  // LATENCY FIX: skip the re-plan call(s) entirely when the customer's own
+  // message shows no sign of wanting anything beyond this one lookup - see
+  // hasLikelyFollowUpSignal's own comment. `message` is constant for the
+  // whole orchestration, so this is decided once, not re-checked per
+  // iteration - if it's true, every subsequent iteration behaves exactly as
+  // it did before this fix.
+  const mightNeedFurtherAction = hasLikelyFollowUpSignal(message);
+  if (lastResult.grounded && !mightNeedFurtherAction) {
+    terminationReason = "no_followup_signal";
+    logOrchestrationEvent("replan_skipped", { reason: "no_followup_signal", tool: lastTool });
+  }
 
   // PART F: an ungrounded result (zero search results / an unresolvable
   // comparison) stops the loop immediately - no re-plan call, no further
   // tool, the existing honest no-result/clarification response is what the
   // caller already returns for this shape.
-  while (lastResult.grounded && step < MAX_AGENT_STEPS && toolCallCount < MAX_TOOL_CALLS) {
+  while (lastResult.grounded && mightNeedFurtherAction && step < MAX_AGENT_STEPS && toolCallCount < MAX_TOOL_CALLS) {
     const executedSummary = executed.slice();
 
     let replan;
@@ -252,14 +321,18 @@ export const runAgentOrchestrator = async (
       replan = await runReplan({ message, uiContext, observedPool, executedSummary }, deps.generateContent);
     } catch (error) {
       console.error("agentOrchestrator: re-plan call failed:", error.message);
+      terminationReason = "replan_call_failed";
       break; // fall back to the current best (already-grounded) result
     }
     step += 1;
+    logOrchestrationEvent("planner_decision", { type: replan.type, toolName: replan.toolName || null, step });
 
     if (replan.type === "clarify") {
+      logOrchestrationEvent("terminated", { reason: "clarification", step, toolCallCount });
       return { success: true, tool: null, reply: replan.reply, replyType: "clarification" };
     }
     if (replan.type !== "tool") {
+      terminationReason = replan.type === "done" ? "done" : "unknown_planner_output";
       break; // "done" or "unknown" - stop, current best result is final
     }
 
@@ -272,7 +345,8 @@ export const runAgentOrchestrator = async (
       // fallback (query/superlative/name match) gets a fair shot instead of
       // an unverifiable id ever reaching a cart/order mutation.
       const finalArgs = { ...sanitizedArgs };
-      if (finalArgs.productId && !observedPool.has(String(finalArgs.productId))) {
+      const invented = Boolean(finalArgs.productId) && !observedPool.has(String(finalArgs.productId));
+      if (invented) {
         finalArgs.productId = "";
       }
       // PRECISION FIX: if the planner left productId empty/invalid (e.g. it
@@ -286,6 +360,9 @@ export const runAgentOrchestrator = async (
       if (toolName === "add_to_cart" && !finalArgs.productId && observedPool.size === 1) {
         finalArgs.productId = observedPool.keys().next().value;
       }
+      logOrchestrationEvent("mutation_handoff", {
+        tool: toolName, step, toolCallCount, hadProductId: Boolean(finalArgs.productId), inventedIdStripped: invented,
+      });
       // Never executed here - handed off exactly like a single-shot
       // request; the frontend's completely unmodified case for this tool
       // (including its own confirmation gate, if any) does the rest.
@@ -295,6 +372,8 @@ export const runAgentOrchestrator = async (
     if (isObservableTool(toolName)) {
       const signature = toolCallSignature(toolName, sanitizedArgs);
       if (seenSignatures.has(signature)) {
+        terminationReason = "loop_detected";
+        logOrchestrationEvent("loop_detected", { tool: toolName, step, toolCallCount });
         break; // PART J: exact repeat detected - stop, return current best result
       }
       seenSignatures.add(signature);
@@ -304,11 +383,17 @@ export const runAgentOrchestrator = async (
         lastResult = await executeObservableTool(toolName, sanitizedArgs, ctx, deps);
       } catch (error) {
         console.error("agentOrchestrator: chained tool execution failed:", error.message);
+        terminationReason = "chained_tool_failed";
+        logOrchestrationEvent("tool_execution_failed", { tool: toolName, step, toolCallCount });
         break; // fall back to the current best (already-grounded) result
       }
       lastTool = toolName;
       lastArgs = sanitizedArgs;
       recordObservation(lastTool, lastArgs, lastResult);
+      logOrchestrationEvent("tool_executed", {
+        tool: lastTool, step, toolCallCount, grounded: lastResult.grounded, sourceCount: (lastResult.sources || []).length,
+      });
+      if (!lastResult.grounded) terminationReason = "ungrounded";
       continue;
     }
 
@@ -316,8 +401,14 @@ export const runAgentOrchestrator = async (
     // track_order) as the terminal action the customer asked for after
     // seeing results (e.g. "show me jackets, then open the first one") -
     // never executed here, handed off the same way a mutation is.
+    logOrchestrationEvent("readonly_handoff", { tool: toolName, step, toolCallCount });
     return { success: true, tool: toolName, arguments: sanitizedArgs };
   }
+
+  if (terminationReason === "loop_exhausted" && (step >= MAX_AGENT_STEPS || toolCallCount >= MAX_TOOL_CALLS)) {
+    terminationReason = step >= MAX_AGENT_STEPS ? "max_agent_steps_reached" : "max_tool_calls_reached";
+  }
+  logOrchestrationEvent("terminated", { reason: terminationReason, tool: lastTool, step, toolCallCount, grounded: lastResult.grounded });
 
   return { success: true, tool: lastTool, arguments: lastArgs, rag: lastResult };
 };

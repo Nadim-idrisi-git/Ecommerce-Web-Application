@@ -11,6 +11,8 @@ import {
 } from "../utils/aiChatContext.js";
 import { CLARIFY_PREFIX, extractFunctionCall, extractReplyText } from "../utils/geminiResponseParsing.js";
 import { runAgentOrchestrator, isObservableTool } from "../utils/agentOrchestrator.js";
+import { callGeminiWithRetry } from "../utils/callGeminiWithRetry.js";
+import { logOrchestrationEvent } from "../utils/orchestrationLogger.js";
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
@@ -54,6 +56,26 @@ export const buildRagFiltersForTool = (toolName, sanitizedArgs) => {
   };
 };
 
+// MODULE 15 hardening: mutation/reference tools (add_to_cart,
+// update_cart_quantity, remove_from_cart, open_product) carry a `productId`
+// Gemini resolves itself from uiContext. The orchestrated path
+// (agentOrchestrator.js) already validates this against what it actually
+// retrieved this turn - but a DIRECT, single-shot call (the common case,
+// e.g. "add this jacket to my cart" resolved in the very first Gemini call)
+// had no backend-side existence check at all, relying entirely on the
+// frontend's own resolveProductFromArgs to fail closed. This closes that gap
+// using the catalog already fetched for this request - zero extra latency/
+// DB call. Known limitation: getCachedCatalog() is capped at
+// CATALOG_CONTEXT_LIMIT (150) products for prompt-size reasons - if the real
+// catalog ever exceeds that, a genuine product outside the cached set would
+// be incorrectly treated as unverifiable here. True today (44 real
+// products); flagged rather than silently relied on as the catalog grows.
+export const stripUnverifiedProductId = (sanitizedArgs, validProductIds) => {
+  if (!sanitizedArgs.productId) return sanitizedArgs;
+  if (validProductIds.has(String(sanitizedArgs.productId))) return sanitizedArgs;
+  return { ...sanitizedArgs, productId: "" };
+};
+
 export const detectAIIntent = async (req, res) => {
   try {
     const message = sanitizeMessage(req.body?.message);
@@ -70,6 +92,7 @@ export const detectAIIntent = async (req, res) => {
       getCachedCatalog(),
       getFirstName(req.userId),
     ]);
+    const validProductIds = new Set(products.map((product) => String(product._id)));
 
     const historyContents = sanitizeHistory(history);
     const safeRecentActivity = sanitizeRecentActivity(recentActivity);
@@ -180,7 +203,10 @@ Customer message:
 ${message}
       `;
 
-    const response = await ai.models.generateContent({
+    // MODULE 15: bounded timeout + single transient-only retry
+    // (utils/callGeminiWithRetry.js) - same call, same config, purely a
+    // reliability wrapper around the network request.
+    const response = await callGeminiWithRetry(() => ai.models.generateContent({
       model: "gemini-3.6-flash",
       contents: [...historyContents, { role: "user", parts: [{ text: promptText }] }],
       config: {
@@ -192,7 +218,7 @@ ${message}
         // through a task this simple for no quality benefit here.
         thinkingConfig: { thinkingLevel: "low" },
       },
-    });
+    }));
 
     const call = extractFunctionCall(response);
 
@@ -201,6 +227,8 @@ ${message}
       const sanitizedArgs = sanitize(call.args || {});
 
       if (sanitizedArgs) {
+        logOrchestrationEvent("request_dispatched", { tool: call.name, orchestrated: isObservableTool(call.name) });
+
         // MODULE 14: search_products/recommend_products/compare_products are
         // the three tools with a real, grounded server-side observation
         // worth re-planning from - they're handed to the bounded agent
@@ -232,7 +260,7 @@ ${message}
         return res.json({
           success: true,
           tool: call.name,
-          arguments: sanitizedArgs,
+          arguments: stripUnverifiedProductId(sanitizedArgs, validProductIds),
         });
       }
     }
@@ -251,6 +279,7 @@ ${message}
     });
   } catch (error) {
     console.error("AI intent detection error:", error);
+    logOrchestrationEvent("gemini_failure", { stage: "initial_tool_selection" });
 
     return res.status(500).json({
       success: false,

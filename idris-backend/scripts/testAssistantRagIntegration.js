@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { isRagEligibleTool } from "../utils/rag/ragEligibility.js";
 import { assistantRag, AssistantRagError } from "../utils/rag/assistantRag.js";
-import { buildRagFiltersForTool } from "../controllers/intentController.js";
+import { buildRagFiltersForTool, stripUnverifiedProductId } from "../controllers/intentController.js";
 
 let passed = 0;
 const test = (name, fn) => {
@@ -229,6 +229,24 @@ test("the tool-dispatch response stays valid (success/tool/arguments) with rag a
   // arguments) still gets exactly what it always got - `rag` is additive.
   const { success, tool, arguments: args } = withRag;
   assert.deepEqual({ success, tool, arguments: args }, baseToolResponse);
+});
+
+// --- MODULE 15: direct (non-orchestrated) mutation calls also validate productId ---
+test("stripUnverifiedProductId keeps a productId that's in the real catalog", () => {
+  const valid = new Set(["real-id-1", "real-id-2"]);
+  const args = { productId: "real-id-1", size: "M", quantity: 1 };
+  assert.deepEqual(stripUnverifiedProductId(args, valid), args);
+});
+test("stripUnverifiedProductId strips a productId not present in the real catalog", () => {
+  const valid = new Set(["real-id-1"]);
+  const result = stripUnverifiedProductId({ productId: "invented-id", query: "the jacket" }, valid);
+  assert.equal(result.productId, "");
+  assert.equal(result.query, "the jacket", "the query fallback is preserved for the frontend's own fuzzy match");
+});
+test("stripUnverifiedProductId is a no-op when no productId was supplied at all", () => {
+  const valid = new Set(["real-id-1"]);
+  const args = { query: "some jacket", sortBy: "" };
+  assert.deepEqual(stripUnverifiedProductId(args, valid), args);
 });
 
 console.log(`\n${passed} test(s) passed.`);

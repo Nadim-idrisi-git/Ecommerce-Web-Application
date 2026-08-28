@@ -10,6 +10,7 @@ import { buildRagContext } from "./buildRagContext.js";
 import { buildRagComparisonSystemPrompt } from "./ragComparisonPrompt.js";
 import { detectResponseLanguage, getLanguageInstruction } from "./languageIntent.js";
 import { isValidCandidate } from "./generateRagAnswer.js";
+import { callGeminiWithRetry } from "../callGeminiWithRetry.js";
 import {
   RAG_GENERATION_MODEL,
   RAG_GENERATION_TEMPERATURE,
@@ -74,7 +75,10 @@ export const buildComparisonPromptText = (context, query, languageInstruction) =
 // exposed to/accepted from an actual caller.
 export const generateComparisonAnswer = async (
   { query, candidates } = {},
-  generateContent = (params) => ai.models.generateContent(params),
+  // MODULE 15: bounded timeout + single transient-only retry - see
+  // callGeminiWithRetry.js's own header. Never used by a test - every test
+  // supplies its own generateContent, bypassing this default entirely.
+  generateContent = (params) => callGeminiWithRetry(() => ai.models.generateContent(params)),
 ) => {
   let normalizedQuery;
   try {

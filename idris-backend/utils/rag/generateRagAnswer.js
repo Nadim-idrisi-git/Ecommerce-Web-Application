@@ -6,6 +6,7 @@ import { normalizeRagQuery } from "./embedRagQuery.js";
 import { buildRagContext } from "./buildRagContext.js";
 import { buildRagSystemPrompt } from "./ragGenerationPrompt.js";
 import { detectResponseLanguage, getLanguageInstruction } from "./languageIntent.js";
+import { callGeminiWithRetry } from "../callGeminiWithRetry.js";
 import {
   RAG_GENERATION_MODEL,
   RAG_GENERATION_TEMPERATURE,
@@ -120,7 +121,10 @@ export const buildPromptText = (context, query, languageInstruction, relaxationI
 // constants above regardless of what's passed here).
 export const generateRagAnswer = async (
   { query, candidates, relaxed } = {},
-  generateContent = (params) => ai.models.generateContent(params),
+  // MODULE 15: bounded timeout + single transient-only retry - see
+  // callGeminiWithRetry.js's own header. Never used by a test - every test
+  // supplies its own generateContent, bypassing this default entirely.
+  generateContent = (params) => callGeminiWithRetry(() => ai.models.generateContent(params)),
 ) => {
   let normalizedQuery;
   try {
