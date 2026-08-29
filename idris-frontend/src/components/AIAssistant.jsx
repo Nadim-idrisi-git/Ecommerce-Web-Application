@@ -341,6 +341,24 @@ export default function AIAssistant() {
   // Timestamp of the last time speaking actually stopped (naturally or via
   // barge-in) - see ECHO_GUARD_MS's declaration for why.
   const lastSpeakEndTimeRef = useRef(0);
+  // Fires once whatever speakText() call is currently playing actually
+  // finishes (naturally, on error, or via an interrupting stopSpeaking()) -
+  // set by speakText() itself, consumed+cleared by whichever completion path
+  // fires first. Lets a caller react to "the audio is really done" without
+  // speakText()'s own returned promise, which resolves once the response
+  // stream is fully read, not once playback has finished (chunks keep
+  // playing asynchronously after that via the Web Audio API's own timing).
+  const speechEndCallbackRef = useRef(null);
+  // True only while the opening greeting is being spoken. On a phone the
+  // speaker and mic are close enough that the greeting routinely leaks back
+  // into the mic the instant recognition starts listening (there's no echo
+  // cancellation available for the native SpeechRecognition audio path) -
+  // recognition.onspeechstart would otherwise read that self-echo as a
+  // customer barge-in and cut the greeting off mid-word, which is exactly
+  // the "namaste, cuts off, thinks, namaste again" loop this guards against.
+  // Cleared the moment the greeting's own audio actually ends, so real
+  // barge-in on every later reply is unaffected.
+  const suppressBargeInRef = useRef(false);
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const audioChunksRef = useRef([]);
@@ -752,6 +770,16 @@ export default function AIAssistant() {
 
   const SPEECH_SAMPLE_RATE = 24000;
 
+  // Consumes and fires whatever speakText() call is currently playing set as
+  // "notify me when this finishes" (see speechEndCallbackRef's declaration).
+  // Called from every real completion path (natural end, error, or an
+  // interrupting stopSpeaking()) so it always fires exactly once per call.
+  const fireSpeechEndCallback = () => {
+    const pendingSpeechEndCb = speechEndCallbackRef.current;
+    speechEndCallbackRef.current = null;
+    pendingSpeechEndCb?.();
+  };
+
   const stopSpeaking = () => {
     // Invalidate any in-flight/streaming speech so late-arriving chunks or
     // events from a superseded request can't start/continue audio.
@@ -781,6 +809,7 @@ export default function AIAssistant() {
     liveNextStartTimeRef.current = 0;
 
     setIsSpeaking(false);
+    fireSpeechEndCallback();
   };
 
   // Fallback path only: used when the streamed neural voice can't be reached
@@ -796,6 +825,7 @@ export default function AIAssistant() {
       // UI doesn't get stuck showing "Speaking" forever.
       setIsSpeaking(false);
       scheduleSilenceNudge();
+      fireSpeechEndCallback();
       return;
     }
 
@@ -812,10 +842,12 @@ export default function AIAssistant() {
     utterance.onend = () => {
       setIsSpeaking(false);
       scheduleSilenceNudge();
+      fireSpeechEndCallback();
     };
     utterance.onerror = () => {
       setIsSpeaking(false);
       scheduleSilenceNudge();
+      fireSpeechEndCallback();
     };
 
     speechSynthesisRef.current?.speak(utterance);
@@ -870,6 +902,7 @@ export default function AIAssistant() {
         // superseded/interrupted stream (barge-in) already gets its
         // reschedule from the path that interrupted it, not from here.
         scheduleSilenceNudge();
+        fireSpeechEndCallback();
       }
     };
   };
@@ -880,10 +913,11 @@ export default function AIAssistant() {
   // 4-6s for a non-streaming request, and (being one multilingual model
   // rather than a locale-picked browser voice) pronounces Hindi and Hinglish
   // naturally instead of reading them through an English voice.
-  const speakText = async (text) => {
+  const speakText = async (text, { onSpeechEnd } = {}) => {
     if (!text) return;
 
     stopSpeaking();
+    speechEndCallbackRef.current = onSpeechEnd || null;
     const generation = liveGenerationRef.current;
     // Flip immediately rather than waiting for the first streamed audio
     // chunk (~1.2-1.6s away) - otherwise the UI sits in the idle state for
@@ -2642,7 +2676,13 @@ export default function AIAssistant() {
         scheduleSilenceNudge();
         if (!hasGreetedRef.current) {
           hasGreetedRef.current = true;
-          speakText(greetingLine);
+          suppressBargeInRef.current = true;
+          speakText(greetingLine, {
+            onSpeechEnd: () => {
+              suppressBargeInRef.current = false;
+            },
+          });
+          pushHistory("assistant", greetingLine);
         }
       };
 
@@ -2951,7 +2991,11 @@ export default function AIAssistant() {
     // state variable would freeze at whatever it was when recognition was
     // first created (effectively always false) and never fire again.
     // stopSpeaking() is a safe no-op when nothing is currently playing.
+    // suppressBargeInRef is read here as a ref rather than state, so it
+    // doesn't have that staleness problem - see its declaration for why the
+    // opening greeting specifically needs this exception.
     recognition.onspeechstart = () => {
+      if (suppressBargeInRef.current) return;
       stopSpeaking();
       clearSilenceTimer();
     };
@@ -3197,7 +3241,13 @@ export default function AIAssistant() {
         setStatus("listening");
         if (!hasGreetedRef.current) {
           hasGreetedRef.current = true;
-          speakText(greetingLine);
+          suppressBargeInRef.current = true;
+          speakText(greetingLine, {
+            onSpeechEnd: () => {
+              suppressBargeInRef.current = false;
+            },
+          });
+          pushHistory("assistant", greetingLine);
         }
         try {
           recognition.start();
