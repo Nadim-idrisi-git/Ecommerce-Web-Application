@@ -56,7 +56,7 @@ export const fetchComparisonCandidates = async (sourceIds, deps = {}) => {
   if (!sourceIds.length) return [];
 
   const docs = await model
-    .find({ sourceId: { $in: sourceIds } })
+    .find({ sourceId: { $in: sourceIds } }, "sourceId type text metadata")
     .lean();
 
   return docs.map((doc) => ({

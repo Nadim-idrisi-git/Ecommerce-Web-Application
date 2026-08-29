@@ -42,7 +42,19 @@ export const normalizeRagQuery = (query) => {
 
 const MAX_ATTEMPTS = 3;
 const BASE_DELAY_MS = 500;
+const EMBED_CALL_TIMEOUT_MS = 8000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Same bounded-worst-case pattern as callGeminiWithRetry.js's withTimeout -
+// a hung embedContent call (no error, no response) must not leave the whole
+// RAG chain behind it waiting indefinitely.
+const withTimeout = (promise, ms) => {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Embedding call timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+};
 
 const isTransientError = (error) => {
   const status = Number(error?.status ?? error?.code ?? error?.response?.status);
@@ -64,14 +76,17 @@ const callEmbedContent = async (text) => {
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     try {
-      return await ai.models.embedContent({
-        model: RAG_EMBEDDING_MODEL,
-        contents: [text],
-        config: {
-          taskType: RAG_EMBEDDING_QUERY_TASK_TYPE,
-          outputDimensionality: RAG_EMBEDDING_OUTPUT_DIMENSIONALITY,
-        },
-      });
+      return await withTimeout(
+        ai.models.embedContent({
+          model: RAG_EMBEDDING_MODEL,
+          contents: [text],
+          config: {
+            taskType: RAG_EMBEDDING_QUERY_TASK_TYPE,
+            outputDimensionality: RAG_EMBEDDING_OUTPUT_DIMENSIONALITY,
+          },
+        }),
+        EMBED_CALL_TIMEOUT_MS,
+      );
     } catch (error) {
       lastError = error;
       if (attempt === MAX_ATTEMPTS || !isTransientError(error)) throw error;
