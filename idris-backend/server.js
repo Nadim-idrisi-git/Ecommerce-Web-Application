@@ -73,7 +73,7 @@ app.use(async (req, res, next) => {
     res.status(503).json({ success: false, message: "Database connection unavailable" })
   }
 })
-app.use('/assets', express.static(path.resolve(process.cwd(), '../idris-frontend/src/assets'), {
+app.use('/assets', express.static(path.resolve(process.cwd(), 'assets'), {
   maxAge: "30d",
   immutable: true,
 }))

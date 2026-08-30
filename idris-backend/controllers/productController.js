@@ -104,7 +104,7 @@ const listProducts = async (req, res) => {
 };
 
 const getAssetProducts = () => {
-    const assetsPath = path.resolve(process.cwd(), "../idris-frontend/src/assets/assets.js");
+    const assetsPath = path.resolve(process.cwd(), "assets/assets.js");
     const source = fs.readFileSync(assetsPath, "utf8");
 
     const imageImports = Object.fromEntries(
