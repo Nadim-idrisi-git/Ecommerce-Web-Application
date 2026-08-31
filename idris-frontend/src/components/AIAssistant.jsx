@@ -2985,17 +2985,25 @@ export default function AIAssistant() {
     };
 
     // Barge-in: cut the assistant off the instant the user starts talking,
-    // even mid-sentence. This is unconditional (not gated on an `isSpeaking`
-    // check) deliberately - `ensureRecognition()` only ever runs once and
-    // caches the recognition object, so a closure here over the `isSpeaking`
-    // state variable would freeze at whatever it was when recognition was
-    // first created (effectively always false) and never fire again.
-    // stopSpeaking() is a safe no-op when nothing is currently playing.
-    // suppressBargeInRef is read here as a ref rather than state, so it
-    // doesn't have that staleness problem - see its declaration for why the
-    // opening greeting specifically needs this exception.
+    // even mid-sentence. suppressBargeInRef is read here as a ref rather
+    // than state so it doesn't go stale inside this closure (ensureRecognition()
+    // only ever runs once and caches the recognition object) - see its
+    // declaration for why the opening greeting specifically needs that
+    // exception. isSpeakingRef is read the same way and for the same reason:
+    // on a phone the speaker's own output bleeds straight into the mic (no
+    // reliable echo cancellation for the raw Web Audio API playback path -
+    // see ECHO_GUARD_MS's declaration), so onspeechstart fires on the
+    // assistant's own voice on every reply, not just the greeting, cutting
+    // it off immediately and repeating every turn. Skipping it while
+    // isSpeakingRef is true doesn't disable real barge-in - onresult below
+    // already calls stopSpeaking() itself once actual words are transcribed,
+    // guarded by that same echo check, so a genuine interruption still stops
+    // the assistant, just from the transcript arriving rather than this
+    // volume-only signal. stopSpeaking() is a safe no-op when nothing is
+    // currently playing, which is why this doesn't need an isSpeakingRef
+    // check the other way around.
     recognition.onspeechstart = () => {
-      if (suppressBargeInRef.current) return;
+      if (suppressBargeInRef.current || isSpeakingRef.current) return;
       stopSpeaking();
       clearSilenceTimer();
     };
