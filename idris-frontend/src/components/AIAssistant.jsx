@@ -416,7 +416,7 @@ export default function AIAssistant() {
   // talking" event the way SpeechRecognition does, so barge-in there needs
   // its own lightweight mic-level watcher.
   const vadCleanupRef = useRef(null);
-  // Whether the mic level has crossed VOLUME_THRESHOLD at all during the
+  // Whether the mic level has crossed the adaptive speech threshold at all during the
   // *current* MediaRecorder recording cycle (reset per cycle) - gates the
   // end-of-utterance timer below so silence before the customer has said
   // anything can't stop the recording early.
@@ -517,32 +517,12 @@ export default function AIAssistant() {
     Boolean(window.navigator.brave) ||
     /Brave/i.test(window.navigator.userAgent || "");
 
-  // Chrome Desktop/Android only - excludes CriOS (Chrome on iOS, which is
-  // actually WebKit/Safari under the hood per Apple's platform rules, so it
-  // already behaves like Safari) and Edge (Edg/, out of scope - not reported
-  // broken, and this keeps the fix's blast radius to exactly the browsers it
-  // was asked for).
-  //
-  // Used in startRecording/ensureRecognition to route Chrome to the
-  // MediaRecorder voice path (see voiceModeRef/startMediaRecorderSession)
-  // instead of native SpeechRecognition. This isn't a preference - Chrome's
-  // SpeechRecognition captures the mic through its own internal, browser-
-  // managed audio pipeline that takes no constraints at all (no
-  // echoCancellation, nothing a page can set), entirely separate from any
-  // getUserMedia stream the page opens. So no amount of AEC applied to a
-  // page-side stream ever reaches what SpeechRecognition itself transcribes -
-  // that pipeline has no cancellation reference for the assistant's own TTS
-  // and will keep hearing it regardless. The MediaRecorder path doesn't have
-  // that problem: it's built entirely on a getUserMedia stream the page
-  // controls directly, so echoCancellation actually applies to the audio
-  // that gets transcribed. Safari has the same SpeechRecognition limitation,
-  // but per the user it isn't misfiring there, so it's left on its existing
-  // path rather than risking a regression on a browser that already works.
-  const isChromeBrowser = () =>
-    !isBraveBrowser() &&
-    /Chrome\//i.test(window.navigator.userAgent || "") &&
-    !/Edg\//i.test(window.navigator.userAgent || "");
-
+  // Chrome's native SpeechRecognition path is preferred when available. It
+  // provides browser-managed speech detection and avoids depending on a
+  // page-side AudioContext analyser whose signal level varies widely by
+  // device. Brave is allowed through this path too; if its speech service is
+  // blocked by Shields or browser policy, recognition.onerror switches to the
+  // MediaRecorder fallback below.
   useEffect(() => {
     return () => {
       listeningSessionRef.current = false;
@@ -682,7 +662,7 @@ export default function AIAssistant() {
   // pause, short enough that replies don't lag noticeably behind the native
   // path's.
   const SPEECH_END_SILENCE_MS = 1100;
-  // Volume must stay above VOLUME_THRESHOLD for this long, continuously,
+  // Volume must stay above the adaptive speech threshold for this long, continuously,
   // before it counts as the start of a real utterance - filters out a
   // single loud frame (a click, a cough, a stray noise spike) from being
   // treated as "the customer said something," which otherwise queued up a
@@ -701,7 +681,11 @@ export default function AIAssistant() {
   // recording once the customer has spoken and then gone quiet for
   // SPEECH_END_SILENCE_MS, so a Brave session doesn't have to be manually
   // stopped after every single utterance. Returns a cleanup function.
-  const VOLUME_THRESHOLD = 0.035;
+  // A fixed 0.035 RMS threshold is too high for quiet laptop/phone
+  // microphones. Chrome testing showed a live idle stream around 0.0056,
+  // which means normal low-volume speech can stay below the old threshold
+  // forever. The monitor now adapts from the observed noise floor below.
+  const MIN_SPEECH_RMS = 0.012;
 
   // allowInterruptWhileSpeaking (Chrome only - see isChromeBrowser and its
   // call site in startMediaRecorderSession): the isSpeakingRef gates just
@@ -721,7 +705,10 @@ export default function AIAssistant() {
   const startVoiceActivityMonitor = (
     stream,
     onUtteranceEnd,
-    { allowInterruptWhileSpeaking = false } = {},
+    {
+      allowInterruptWhileSpeaking = false,
+      minSpeechRms = MIN_SPEECH_RMS,
+    } = {},
   ) => {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (typeof AudioContextClass === "undefined") return () => {};
@@ -733,6 +720,13 @@ export default function AIAssistant() {
       return () => {};
     }
 
+    // Chrome and Brave may create analyser contexts in the suspended state,
+    // especially when the mic session starts from a delayed callback after
+    // the original click. A suspended analyser returns a flat signal, so the
+    // recorder never detects speech and appears to ignore the customer.
+    const resumePromise = audioContext.resume?.();
+    resumePromise?.catch(() => {});
+
     const source = audioContext.createMediaStreamSource(stream);
     const analyser = audioContext.createAnalyser();
     analyser.fftSize = 512;
@@ -741,10 +735,11 @@ export default function AIAssistant() {
     const buffer = new Uint8Array(analyser.frequencyBinCount);
     let rafId = null;
     let stopped = false;
-    // When the volume most recently crossed VOLUME_THRESHOLD - null while
+    // When the volume most recently crossed the speech threshold - null while
     // below it. Used to require MIN_SPEECH_DURATION_MS of continuous sound
     // before treating it as real speech (see MIN_SPEECH_DURATION_MS).
     let aboveThresholdSince = null;
+    let noiseFloor = 0.005;
 
     const tick = () => {
       if (stopped) return;
@@ -757,7 +752,33 @@ export default function AIAssistant() {
         sumSquares += normalized * normalized;
       }
 
-      if (Math.sqrt(sumSquares / buffer.length) > VOLUME_THRESHOLD) {
+      const rms = Math.sqrt(sumSquares / buffer.length);
+      const assistantGreetingActive = suppressBargeInRef.current;
+
+      // Track quiet-room noise slowly. The floor is frozen while the
+      // assistant is speaking so a leaked reply cannot raise the threshold
+      // and make the next customer turn disappear.
+      if (!assistantGreetingActive && !isSpeakingRef.current && rms < noiseFloor * 2.5) {
+        noiseFloor = noiseFloor * 0.95 + rms * 0.05;
+      }
+      const speechThreshold = Math.max(minSpeechRms, noiseFloor * 2.5);
+
+      // The opening greeting is played immediately after the recorder starts.
+      // Ignore its acoustic output completely, otherwise Chrome/Brave can
+      // mistake the greeting for the customer's first command and restart the
+      // recorder/transcription loop before the customer has spoken.
+      if (assistantGreetingActive) {
+        aboveThresholdSince = null;
+        utteranceSpeechDetectedRef.current = false;
+        if (utteranceEndTimerRef.current) {
+          clearTimeout(utteranceEndTimerRef.current);
+          utteranceEndTimerRef.current = null;
+        }
+        rafId = requestAnimationFrame(tick);
+        return;
+      }
+
+      if (rms > speechThreshold) {
         // See allowInterruptWhileSpeaking's declaration above - browsers
         // without a confirmed AEC reference for her own TTS keep the old
         // "only once she's already done talking" behavior; Chrome, which
@@ -1104,7 +1125,11 @@ export default function AIAssistant() {
 
         if (speechAudioElRef.current) {
           speechAudioElRef.current.srcObject = destinationNode.stream;
-          await speechAudioElRef.current.play().catch(() => {});
+          // Do not swallow autoplay/device errors here. If Chrome or Brave
+          // rejects playback, the surrounding catch must switch to the
+          // browser's speech engine instead of leaving the UI stuck on
+          // "Speaking" with no audible response.
+          await speechAudioElRef.current.play();
         }
       }
 
@@ -2919,6 +2944,19 @@ export default function AIAssistant() {
         }
       };
 
+      recorder.onerror = () => {
+        // MediaRecorder failures otherwise leave the widget looking like it
+        // is listening forever while no audio can ever reach transcription.
+        // Stop this cycle and surface a recoverable state to the customer.
+        if (mediaRecorderRef.current === recorder) {
+          mediaRecorderRef.current = null;
+        }
+        setVoiceError(
+          "Voice recording is temporarily unavailable. Please try again.",
+        );
+        setStatus("error");
+      };
+
       recorder.onstop = () => {
         const audioBlob = new Blob(audioChunksRef.current, {
           type: recordingMimeTypeRef.current || recorder.mimeType || "audio/webm",
@@ -2962,7 +3000,17 @@ export default function AIAssistant() {
           recorder.stop();
         }
       },
-      { allowInterruptWhileSpeaking: isChromeBrowser() },
+      // Keep the conservative echo gate for both Chrome and Brave. The
+      // microphone analyser cannot reliably distinguish a user's voice from
+      // speaker leakage in every room/device, and treating that leakage as a
+      // barge-in causes the same command to be transcribed repeatedly.
+      {
+        allowInterruptWhileSpeaking: false,
+        // Brave commonly exposes a quieter processed mic stream than Chrome.
+        // Keep Chrome's tested threshold unchanged and make only Brave's
+        // fallback sensitive enough to detect normal speech.
+        minSpeechRms: isBraveBrowser() ? 0.008 : MIN_SPEECH_RMS,
+      },
     );
 
     startRecorderCycle();
@@ -3193,11 +3241,6 @@ export default function AIAssistant() {
   });
 
   const ensureRecognition = () => {
-    // See isChromeBrowser's declaration - Chrome is routed to the
-    // MediaRecorder path the same as Brave, so this never even constructs a
-    // SpeechRecognition object for it.
-    if (isBraveBrowser() || isChromeBrowser()) return null;
-
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -3206,12 +3249,17 @@ export default function AIAssistant() {
     if (recognitionRef.current) return recognitionRef.current;
 
     const recognition = new SpeechRecognition();
-    recognition.continuous = true;
+    const braveBrowser = isBraveBrowser();
+    // Brave's continuous recognizer can hold a completed phrase open while
+    // its service waits for another segment. One-shot recognition returns at
+    // the first natural pause, matching the fast Chrome interaction. If the
+    // Brave service is unavailable, onerror still falls back to recording.
+    recognition.continuous = !braveBrowser;
     recognition.interimResults = true;
     // Confirmed-working baseline across Chrome/Safari/Brave - see
     // recognizedTextBufferRef's declaration for why this stays fixed rather
     // than trying to switch locale for Hindi.
-    recognition.lang = "en-IN";
+    recognition.lang = braveBrowser ? "en-US" : "en-IN";
 
     recognition.onstart = () => {
       setStatus("listening");
@@ -3310,6 +3358,21 @@ export default function AIAssistant() {
 
     recognition.onerror = (event) => {
       if (event.error === "not-allowed") {
+        // Brave can reject its browser speech service even when microphone
+        // capture itself is permitted. Let it use the recorder fallback;
+        // getUserMedia below still reports a genuine mic denial correctly.
+        if (isBraveBrowser() && voiceModeRef.current === "recognition") {
+          recognition.stop();
+          recognitionRef.current = null;
+          voiceModeRef.current = "media";
+          startMediaRecorderSession().catch(() => {
+            setVoiceError(
+              "Voice recognition is temporarily unavailable. Please try again.",
+            );
+            setStatus("error");
+          });
+          return;
+        }
         setStatus("permission-denied");
         return;
       }
@@ -3339,7 +3402,13 @@ export default function AIAssistant() {
     };
 
     recognition.onend = () => {
-      if (listeningSessionRef.current) {
+      // onerror() switches to MediaRecorder before calling stop(). Without
+      // this mode check, the end event races that fallback and starts native
+      // recognition again, leaving two competing capture paths active.
+      if (
+        listeningSessionRef.current &&
+        voiceModeRef.current === "recognition"
+      ) {
         try {
           recognition.start();
         } catch {
@@ -3465,6 +3534,10 @@ export default function AIAssistant() {
       arguments: data.arguments || {},
       reply: data.reply || null,
       replyType: data.replyType || null,
+      // Grounded product answers are generated server-side. Keep the RAG
+      // envelope intact so runTool can render the real products and answer
+      // instead of falling back to the browser's shallow catalog search.
+      rag: data.rag || null,
     };
   };
 
@@ -3491,13 +3564,10 @@ export default function AIAssistant() {
       clearPauseTimer();
       recognizedTextBufferRef.current = "";
       hadSpeechRef.current = false;
-      // Chrome routes through the same MediaRecorder/getUserMedia path as
-      // Brave - see isChromeBrowser's declaration for why native
-      // SpeechRecognition can't be trusted for either of them (Brave
-      // disables/limits it outright; Chrome's has no echo-cancellation
-      // reference for the assistant's own TTS).
-      voiceModeRef.current =
-        isBraveBrowser() || isChromeBrowser() ? "media" : "recognition";
+      // Prefer native speech recognition on every browser that exposes it.
+      // If Brave blocks its speech service, recognition.onerror changes the
+      // mode and starts MediaRecorder as a fallback automatically.
+      voiceModeRef.current = "recognition";
       setTranscript("");
       setAiReply("");
 
@@ -3577,9 +3647,11 @@ export default function AIAssistant() {
       setOpen(true);
       setRippleSeq((seq) => seq + 1);
 
-      setTimeout(() => {
-        startRecording();
-      }, 400);
+      // Start from the actual click so Chrome/Brave retain the user gesture
+      // for microphone/audio activation. Delaying this by a timer can leave
+      // AudioContext or media playback suspended even after permission was
+      // granted, making the assistant appear to ignore the first turn.
+      startRecording();
 
       return;
     }
@@ -4211,7 +4283,17 @@ export default function AIAssistant() {
       {/* Actual output route for streamed speech - see its creation in
           speakText for why. Not visually rendered, but must stay a real
           mounted element for srcObject/play() to work. */}
-      <audio ref={speechAudioElRef} hidden />
+      <audio
+        ref={speechAudioElRef}
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          width: 1,
+          height: 1,
+          opacity: 0,
+          pointerEvents: "none",
+        }}
+      />
     </>
   );
 }
