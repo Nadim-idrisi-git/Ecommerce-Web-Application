@@ -8,8 +8,10 @@ const ai = new GoogleGenAI({
 // Keeps synthesis fast/cheap and bounds cost - assistant replies are meant
 // to be short spoken sentences, not long-form text.
 const MAX_SPEECH_TEXT_LENGTH = 600;
-// A warm, natural-sounding prebuilt Gemini voice (female).
-const SPEECH_VOICE_NAME = "Kore";
+// One fixed, natural-sounding female Gemini voice for every browser/device.
+// Keeping this server-side prevents Safari/Chrome/Brave from choosing their
+// own local voice or changing Zara's voice between turns.
+const SPEECH_VOICE_NAME = "Aoede";
 // The Live model is a general two-way conversational model, not a plain TTS
 // engine - without this instruction it tends to "reply" to the input text
 // instead of just reading it aloud verbatim.

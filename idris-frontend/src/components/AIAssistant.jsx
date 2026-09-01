@@ -366,6 +366,10 @@ export default function AIAssistant() {
   // Cleared the moment the greeting's own audio actually ends, so real
   // barge-in on every later reply is unaffected.
   const suppressBargeInRef = useRef(false);
+  // Cross-device echo prevention: native recognition and recorder capture are
+  // paused while Zara speaks instead of trying to classify every acoustic
+  // echo after it has already entered the input pipeline.
+  const capturePausedForSpeechRef = useRef(false);
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const audioChunksRef = useRef([]);
@@ -438,6 +442,7 @@ export default function AIAssistant() {
   // state no matter how long the recognition session has been running.
   const processVoiceTextRef = useRef(null);
   const pauseTimerRef = useRef(null);
+  const recognitionRestartTimerRef = useRef(null);
   // Nudges the customer if the mic has been open with no speech from them at
   // all for a while - separate from pauseTimerRef, which is about detecting
   // the end of a single utterance, not a whole idle stretch of the session.
@@ -448,7 +453,6 @@ export default function AIAssistant() {
 
   const recordingMimeTypeRef = useRef("");
   const speechSynthesisRef = useRef(null);
-  const availableVoicesRef = useRef([]);
   // Streamed neural-voice playback state (backend /api/voice/speak, PCM over
   // Web Audio API). liveNextStartTimeRef is the scheduling cursor so
   // sequential chunks play back-to-back with no gap and no overlap.
@@ -517,6 +521,14 @@ export default function AIAssistant() {
     Boolean(window.navigator.brave) ||
     /Brave/i.test(window.navigator.userAgent || "");
 
+  const isSafariBrowser = () => {
+    const userAgent = window.navigator.userAgent || "";
+    return (
+      /Safari/i.test(userAgent) &&
+      !/Chrome|CriOS|Chromium|Edg|OPR|Brave/i.test(userAgent)
+    );
+  };
+
   // Chrome's native SpeechRecognition path is preferred when available. It
   // provides browser-managed speech detection and avoids depending on a
   // page-side AudioContext analyser whose signal level varies widely by
@@ -534,6 +546,11 @@ export default function AIAssistant() {
         } catch {
           // Ignore cleanup races.
         }
+      }
+
+      if (recognitionRestartTimerRef.current) {
+        clearTimeout(recognitionRestartTimerRef.current);
+        recognitionRestartTimerRef.current = null;
       }
 
       const recorder = mediaRecorderRef.current;
@@ -577,20 +594,6 @@ export default function AIAssistant() {
 
   useEffect(() => {
     speechSynthesisRef.current = window.speechSynthesis || null;
-
-    const syncVoices = () => {
-      availableVoicesRef.current = window.speechSynthesis?.getVoices?.() || [];
-    };
-
-    syncVoices();
-    window.speechSynthesis?.addEventListener?.("voiceschanged", syncVoices);
-
-    return () => {
-      window.speechSynthesis?.removeEventListener?.(
-        "voiceschanged",
-        syncVoices,
-      );
-    };
   }, []);
 
   // Devanagari block - reliably distinguishes actual Hindi script from
@@ -600,51 +603,6 @@ export default function AIAssistant() {
 
   const detectSpeechLang = (text) =>
     DEVANAGARI_PATTERN.test(text || "") ? "hi-IN" : "en-IN";
-
-  const getPreferredVoice = (targetLang = "en-IN") => {
-    const voices = availableVoicesRef.current || [];
-
-    if (!voices.length) return null;
-
-    const wantsHindi = targetLang === "hi-IN";
-
-    // Exact voice names vary wildly by browser/OS, so an exact-name allowlist
-    // (the old approach) very often matches nothing and silently falls back
-    // to whatever voice is first - frequently male, robotic, or (worse for
-    // Hindi replies) the wrong language entirely, which is what made Hindi
-    // sound so unnatural: an English voice reading Devanagari text. This
-    // instead scores every voice the device actually offers and picks the
-    // best match: the right language first, then a name that reads as
-    // female, then (when the browser exposes it) a higher-quality
-    // "natural"/"neural"/"online" voice.
-    const FEMALE_NAME_HINTS =
-      /female|zira|aria|samantha|victoria|karen|susan|moira|tessa|fiona|kate|serena|allison|ava|salli|joanna|kimberly|kendra|ivy|heera|lekha|veena|amelie|anna|paulina|kyoko|zoe|emma|sara|nicky/i;
-    const MALE_NAME_HINTS =
-      /male|daniel|david|mark|alex(?!a)|fred|tom|george|james|ryan|matthew|guy|arthur|eric|brian|ravi|hemant/i;
-    const NATURAL_QUALITY_HINTS = /natural|neural|online|premium/i;
-
-    const scoreVoice = (voice) => {
-      const name = voice.name || "";
-      const lang = voice.lang || "";
-      let score = 0;
-
-      const isHindiVoice = /^hi(-|_)?(IN)?/i.test(lang);
-      const isEnglishVoice = /^en(-|_)?(IN|US|GB|AU)?/i.test(lang);
-
-      if (wantsHindi ? isHindiVoice : isEnglishVoice) score += 6;
-      else if (isHindiVoice || isEnglishVoice) score += 1;
-
-      if (NATURAL_QUALITY_HINTS.test(name)) score += 2;
-      if (voice.localService === false) score += 1;
-
-      if (FEMALE_NAME_HINTS.test(name)) score += 5;
-      else if (MALE_NAME_HINTS.test(name)) score -= 5;
-
-      return score;
-    };
-
-    return [...voices].sort((a, b) => scoreVoice(b) - scoreVoice(a))[0] || null;
-  };
 
   const getAudioExtension = (mimeType) => {
     if (mimeType.includes("webm")) return "webm";
@@ -857,6 +815,72 @@ export default function AIAssistant() {
   // "notify me when this finishes" (see speechEndCallbackRef's declaration).
   // Called from every real completion path (natural end, error, or an
   // interrupting stopSpeaking()) so it always fires exactly once per call.
+  const resumeCaptureAfterSpeech = () => {
+    if (!capturePausedForSpeechRef.current) return;
+
+    capturePausedForSpeechRef.current = false;
+
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getAudioTracks().forEach((track) => {
+        track.enabled = true;
+      });
+    }
+
+    if (
+      listeningSessionRef.current &&
+      voiceModeRef.current === "recognition" &&
+      recognitionRef.current
+    ) {
+      const startRecognition = () => {
+        if (
+          !listeningSessionRef.current ||
+          voiceModeRef.current !== "recognition" ||
+          !recognitionRef.current
+        ) {
+          return;
+        }
+
+        try {
+          recognitionRef.current.start();
+        } catch {
+          // The recognizer may still be completing its stop event. Its onend
+          // handler will retry, and this delayed attempt covers browsers that
+          // emit onend before their internal mic is ready again.
+        }
+      };
+
+      startRecognition();
+      recognitionRestartTimerRef.current = setTimeout(() => {
+        recognitionRestartTimerRef.current = null;
+        startRecognition();
+      }, 160);
+    }
+  };
+
+  const pauseCaptureForSpeech = () => {
+    if (!listeningSessionRef.current || suppressBargeInRef.current) return;
+
+    capturePausedForSpeechRef.current = true;
+
+    if (recognitionRef.current && voiceModeRef.current === "recognition") {
+      if (recognitionRestartTimerRef.current) {
+        clearTimeout(recognitionRestartTimerRef.current);
+        recognitionRestartTimerRef.current = null;
+      }
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        // Ignore stop races when speech starts as recognition ends.
+      }
+    }
+
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getAudioTracks().forEach((track) => {
+        track.enabled = false;
+      });
+    }
+  };
+
   const fireSpeechEndCallback = () => {
     // Every real completion path routes through here (see speakText's
     // watchdog declaration) - clearing it here means the failsafe timer
@@ -868,6 +892,7 @@ export default function AIAssistant() {
     const pendingSpeechEndCb = speechEndCallbackRef.current;
     speechEndCallbackRef.current = null;
     pendingSpeechEndCb?.();
+    resumeCaptureAfterSpeech();
   };
 
   const stopSpeaking = () => {
@@ -891,11 +916,6 @@ export default function AIAssistant() {
     });
     livePendingSourcesRef.current = [];
 
-    if (liveAudioContextRef.current) {
-      liveAudioContextRef.current.close().catch(() => {});
-      liveAudioContextRef.current = null;
-    }
-
     liveMediaStreamDestinationRef.current = null;
     if (speechAudioElRef.current) {
       speechAudioElRef.current.pause();
@@ -908,45 +928,34 @@ export default function AIAssistant() {
     fireSpeechEndCallback();
   };
 
-  // Fallback path only: used when the streamed neural voice can't be reached
-  // (offline, backend error, browser lacks Web Audio API) - so the assistant
-  // degrades to the device's own voice instead of going silent.
-  const speakWithBrowserVoice = (text, speechLang) => {
-    if (
-      !window.speechSynthesis ||
-      typeof SpeechSynthesisUtterance === "undefined"
-    ) {
-      // speakText() already optimistically flipped isSpeaking true - if
-      // there's no voice backend to actually pick it up, undo that so the
-      // UI doesn't get stuck showing "Speaking" forever.
-      setIsSpeaking(false);
-      scheduleSilenceNudge();
-      fireSpeechEndCallback();
-      return;
+  // Never downgrade to browser speech synthesis. Its voice and timing vary
+  // by OS/browser and made Chrome/Brave sound unlike the neural assistant.
+  // The text reply remains visible when the neural voice is unavailable.
+  const handleNeuralVoiceUnavailable = (error) => {
+    console.warn("Neural voice unavailable; keeping the text response:", error);
+    setIsSpeaking(false);
+    scheduleSilenceNudge();
+    fireSpeechEndCallback();
+  };
+
+  // Safari may silence a context created after an async network response.
+  // Create it from the assistant click and reuse it for this conversation.
+  const ensurePlaybackAudioContext = () => {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (typeof AudioContextClass === "undefined") return null;
+
+    const existing = liveAudioContextRef.current;
+    if (existing && existing.state !== "closed") return existing;
+
+    try {
+      const audioContext = new AudioContextClass({
+        sampleRate: SPEECH_SAMPLE_RATE,
+      });
+      liveAudioContextRef.current = audioContext;
+      return audioContext;
+    } catch {
+      return null;
     }
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = speechLang;
-    utterance.rate = 1;
-    utterance.pitch = 1;
-    utterance.volume = 1;
-    utterance.voice = getPreferredVoice(speechLang);
-
-    utterance.onstart = () => setIsSpeaking(true);
-    // Back to genuinely idle-and-waiting - restart the "are you still
-    // there" countdown from here (see scheduleSilenceNudge's declaration).
-    utterance.onend = () => {
-      setIsSpeaking(false);
-      scheduleSilenceNudge();
-      fireSpeechEndCallback();
-    };
-    utterance.onerror = () => {
-      setIsSpeaking(false);
-      scheduleSilenceNudge();
-      fireSpeechEndCallback();
-    };
-
-    speechSynthesisRef.current?.speak(utterance);
   };
 
   // Schedules one raw PCM chunk to play immediately after whatever was
@@ -1018,23 +1027,8 @@ export default function AIAssistant() {
   const speakText = async (text, { onSpeechEnd } = {}) => {
     if (!text) return;
 
-    // stopSpeaking() below fires audioContext.close() without awaiting it
-    // (it's called from sync event handlers - onspeechstart, etc. - that
-    // can't await), so the old context can still be mid-close when a new
-    // one gets created right after. Awaiting the *same* context's close()
-    // here is safe even if it's already mid-close - repeated close() calls
-    // on one context all resolve once it's actually closed (Web Audio API
-    // spec), so this just guarantees the old one is fully gone before a new
-    // one is created. Without this, a rapid run of replies (the self-echo
-    // barge-in loop this session already fixed, or genuine rapid-fire
-    // turns) could pile up AudioContexts faster than they close, which is
-    // exactly what surfaces as Chrome's "AudioContext encountered an error
-    // from the audio device" - most browsers cap concurrently-open contexts.
-    const previousAudioContext = liveAudioContextRef.current;
     stopSpeaking();
-    if (previousAudioContext) {
-      await previousAudioContext.close().catch(() => {});
-    }
+    pauseCaptureForSpeech();
     speechEndCallbackRef.current = onSpeechEnd || null;
     lastSpokenTextRef.current = text;
     const generation = liveGenerationRef.current;
@@ -1064,12 +1058,13 @@ export default function AIAssistant() {
     // to speaking.
     setIsSpeaking(true);
 
-    const speechLang = detectSpeechLang(text);
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     const { backendUrl } = getApiConfig();
 
     if (!backendUrl || typeof AudioContextClass === "undefined") {
-      speakWithBrowserVoice(text, speechLang);
+      handleNeuralVoiceUnavailable(
+        new Error("Neural voice requires the backend and Web Audio API"),
+      );
       return;
     }
 
@@ -1096,10 +1091,8 @@ export default function AIAssistant() {
         throw new Error("Speech stream request failed");
       }
 
-      const audioContext = new AudioContextClass({
-        sampleRate: SPEECH_SAMPLE_RATE,
-      });
-      liveAudioContextRef.current = audioContext;
+      const audioContext = ensurePlaybackAudioContext();
+      if (!audioContext) throw new Error("Audio playback could not start");
       liveNextStartTimeRef.current = 0;
       if (audioContext.resume) {
         await audioContext.resume().catch(() => {});
@@ -1119,17 +1112,32 @@ export default function AIAssistant() {
       // acoustic bleed those were compensating for. Safe to no-op on a
       // browser without createMediaStreamDestination - playPcmChunk falls
       // back to the old direct connection in that case.
-      if (typeof audioContext.createMediaStreamDestination === "function") {
+      // Safari can accept the MediaStreamAudioDestinationNode and report a
+      // successful <audio>.play() while producing no audible output after
+      // the opening gesture. Keep Safari on the reliable direct route;
+      // Chromium/Brave use the element route because it gives their AEC an
+      // explicit playback reference for echo suppression.
+      if (
+        !isSafariBrowser() &&
+        typeof audioContext.createMediaStreamDestination === "function"
+      ) {
         const destinationNode = audioContext.createMediaStreamDestination();
         liveMediaStreamDestinationRef.current = destinationNode;
 
         if (speechAudioElRef.current) {
           speechAudioElRef.current.srcObject = destinationNode.stream;
-          // Do not swallow autoplay/device errors here. If Chrome or Brave
-          // rejects playback, the surrounding catch must switch to the
-          // browser's speech engine instead of leaving the UI stuck on
-          // "Speaking" with no audible response.
-          await speechAudioElRef.current.play();
+          try {
+            await speechAudioElRef.current.play();
+          } catch {
+            // Autoplay policy can reject a later stream play even after the
+            // microphone was approved from the original click. Keep the
+            // neural PCM voice: disconnect only the element route and let
+            // playPcmChunk() fall back to AudioContext.destination instead of
+            // downgrading to the browser's synthetic voice.
+            speechAudioElRef.current.pause();
+            speechAudioElRef.current.srcObject = null;
+            liveMediaStreamDestinationRef.current = null;
+          }
         }
       }
 
@@ -1190,10 +1198,10 @@ export default function AIAssistant() {
       }
       if (generation !== liveGenerationRef.current) return;
       console.error(
-        "Streamed voice failed, falling back to browser voice:",
+        "Streamed neural voice failed:",
         error,
       );
-      speakWithBrowserVoice(text, speechLang);
+      handleNeuralVoiceUnavailable(error);
     } finally {
       clearTimeout(safetyTimeout);
       if (liveAbortControllerRef.current === controller) {
@@ -1279,7 +1287,10 @@ export default function AIAssistant() {
       .trim();
 
   const isLikelySelfEcho = (candidateText) => {
-    if (Date.now() - lastSpeakEndTimeRef.current >= ECHO_SUBSTRING_GUARD_MS) {
+    if (
+      !isSpeakingRef.current &&
+      Date.now() - lastSpeakEndTimeRef.current >= ECHO_SUBSTRING_GUARD_MS
+    ) {
       return false;
     }
 
@@ -1853,6 +1864,62 @@ export default function AIAssistant() {
     }
 
     const text = args.query || rawText;
+    const normalized = text.toLowerCase();
+    const selectedPathId =
+      getPageForPath(location.pathname) === "product"
+        ? location.pathname.split("/product/")[1]
+        : "";
+    const selectedProduct = selectedPathId
+      ? products.find((product) => product._id === selectedPathId)
+      : null;
+    const rememberedProducts = memoryRef.current.lastProducts || [];
+    const visibleProducts = getVisibleCollectionProducts();
+    const candidates = rememberedProducts.length
+      ? rememberedProducts
+      : visibleProducts;
+
+    if (selectedProduct && /\b(this|that|it|product)\b/.test(normalized)) {
+      return selectedProduct;
+    }
+
+    const ordinalMatch = normalized.match(
+      /\b(first|1st|second|2nd|third|3rd)\b/,
+    );
+    if (ordinalMatch) {
+      const ordinalIndex = { first: 0, "1st": 0, second: 1, "2nd": 1, third: 2, "3rd": 2 }[
+        ordinalMatch[1]
+      ];
+      if (candidates[ordinalIndex]) return candidates[ordinalIndex];
+    }
+
+    if (/\b(this|that|it|this product|that product)\b/.test(normalized)) {
+      if (candidates.length === 1) return candidates[0];
+      const cartProductIds = Object.keys(cartItems || {});
+      if (cartProductIds.length === 1) {
+        return products.find((product) => product._id === cartProductIds[0]) || null;
+      }
+    }
+
+    // Natural Hindi/Hinglish cart references do not always use a pronoun:
+    // "jo mere cart me product hai", "cart wala item", and "mere bag ka
+    // product" all mean the active cart line. Resolve this before fuzzy
+    // catalog matching so a quantity mutation cannot become a browse action.
+    const refersToCartItem =
+      /\b(cart|bag)\b.{0,50}\b(product|item|quantity|amount)\b/.test(normalized) ||
+      /\b(product|item|quantity|amount)\b.{0,50}\b(cart|bag)\b/.test(normalized) ||
+      /कार्ट|बैग|प्रोडक्ट|आइटम|क्वांटिटी|मात्रा/.test(normalized);
+    if (refersToCartItem) {
+      const cartProductIds = Object.keys(cartItems || {}).filter((productId) =>
+        Object.values(cartItems[productId] || {}).some((quantity) => quantity > 0),
+      );
+      if (cartProductIds.length === 1) {
+        return products.find((product) => product._id === cartProductIds[0]) || null;
+      }
+      // Never guess between several cart products. The caller will turn this
+      // into a clarification rather than changing the wrong line.
+      return null;
+    }
+
     return (
       resolveSuperlativeProduct(text, products) || findProductByQuery(text)
     );
@@ -1962,6 +2029,25 @@ export default function AIAssistant() {
     rememberSearchContext(filters, resolvedProducts, rawQuery || filters.query);
     speakText(rag.answer);
     return rag.answer;
+  };
+
+  // Product-fact questions use RAG for truth and must also show the exact
+  // products referenced by that answer. Reuse the same source-ID resolution
+  // and collection rendering path as search/recommend/compare, so one or many
+  // grounded products are displayed without trusting model-generated names.
+  const respondWithGroundedAnswer = (rag, rawQuery) => {
+    return respondWithRagResult(
+      rag,
+      {
+        query: rawQuery,
+        gender: detectGenderSection(rawQuery),
+        category: "",
+        productType: "",
+        color: "",
+        maxPrice: "",
+      },
+      rawQuery,
+    );
   };
 
   const handleRecommendationQuery = (text) => {
@@ -2599,7 +2685,8 @@ export default function AIAssistant() {
         const product = resolveProductFromArgs(args, rawText);
 
         if (!product) {
-          const spoken = "I could not find that item in your cart.";
+          const spoken =
+            "I could not find that item in your cart, so main aapki quantity change nahi kar sakti.";
           setAiReply(spoken);
           speakText(spoken);
           return spoken;
@@ -2615,10 +2702,11 @@ export default function AIAssistant() {
           return spoken;
         }
 
-        const targetQuantity = Math.max(
-          0,
-          Math.round(Number(args.quantity) || 0),
-        );
+        const currentQuantity = Number(cartForProduct[size]) || 0;
+        const hasDelta = Number.isFinite(Number(args.delta));
+        const targetQuantity = hasDelta
+          ? Math.max(0, currentQuantity + Math.round(Number(args.delta)))
+          : Math.max(0, Math.round(Number(args.quantity) || 0));
         setCartItemQuantity(product._id, size, targetQuantity);
 
         const spoken =
@@ -2724,8 +2812,75 @@ export default function AIAssistant() {
 
   // Backend/offline substitute for the AI tool call - same allowlist, no
   // network round trip. Only used when getAssistantTool() throws.
+  const parseCartQuantityChange = (text) => {
+    const normalized = text.toLowerCase().trim();
+    const spokenNumbers = {
+      one: 1,
+      a: 1,
+      an: 1,
+      two: 2,
+      three: 3,
+      four: 4,
+      five: 5,
+      एक: 1,
+      दो: 2,
+      तीन: 3,
+      चार: 4,
+      पांच: 5,
+    };
+    const numberPattern = "(\\d+|one|a|an|two|three|four|five|एक|दो|तीन|चार|पांच)";
+    const hasCartContext =
+      /\b(cart|bag|product|item)\b|कार्ट|कार्ट में|प्रोडक्ट|आइटम/.test(normalized);
+    if (!hasCartContext) return null;
+
+    const addMoreMatch = normalized.match(
+      new RegExp(`(?:\\badd|put)\\s+${numberPattern}\\s+more\\b`, "i"),
+    );
+    const quantityMatch = normalized.match(
+      new RegExp(
+        `(?:quantity|amount|क्वांटिटी|मात्रा).{0,30}?(?:plus|increase|raise|by|badh[aá]?|badha|प्लस|बढ़ा|ज्यादा)\\s*${numberPattern}\\b`,
+        "i",
+      ),
+    );
+    const increaseMatch = normalized.match(
+      new RegExp(
+        `(?:increase|raise|badh[aá]?|badha|बढ़ा|ज्यादा|प्लस).{0,60}?(?:by|plus|quantity|amount|क्वांटिटी|मात्रा|it|this|that|product|item|कर दो|करो)?.{0,20}?${numberPattern}\\b`,
+        "i",
+      ),
+    );
+    const match = quantityMatch || increaseMatch || addMoreMatch;
+    if (!match) return null;
+
+    const amountToken = match[match.length - 1].toLowerCase();
+    const amount = Number.isFinite(Number(amountToken))
+      ? Number(amountToken)
+      : spokenNumbers[amountToken];
+    return Number.isFinite(amount) && amount > 0 ? { delta: amount } : null;
+  };
+
   const localFallbackTool = (text) => {
     const normalized = text.toLowerCase().trim();
+
+    // Keep explicit cart mutations available during a transient intent/API
+    // failure. Do not infer this from generic "buy" language: only a clear
+    // add/put request aimed at the cart or bag is safe to dispatch here.
+    const quantityChange = parseCartQuantityChange(text);
+    if (quantityChange) {
+      return {
+        tool: "update_cart_quantity",
+        arguments: { query: text, ...quantityChange },
+      };
+    }
+
+    const asksToAddToCart =
+      /\b(add|put|place)\b/.test(normalized) &&
+      /\b(cart|bag)\b/.test(normalized);
+    if (asksToAddToCart) {
+      return {
+        tool: "add_to_cart",
+        arguments: { query: text, quantity: 1 },
+      };
+    }
 
     const sortIntent = detectSortIntent(normalized);
     if (sortIntent) {
@@ -3000,10 +3155,11 @@ export default function AIAssistant() {
           recorder.stop();
         }
       },
-      // Keep the conservative echo gate for both Chrome and Brave. The
-      // microphone analyser cannot reliably distinguish a user's voice from
-      // speaker leakage in every room/device, and treating that leakage as a
-      // barge-in causes the same command to be transcribed repeatedly.
+      // Keep recorder fallback conservative while Zara is speaking. AEC is
+      // helpful but not identical across phones, tablets, laptops, and
+      // browsers; volume-only barge-in cannot reliably distinguish her voice
+      // from the customer's voice. Waiting for playback to finish prevents
+      // false commands and self-triggered reply loops.
       {
         allowInterruptWhileSpeaking: false,
         // Brave commonly exposes a quieter processed mic stream than Chrome.
@@ -3144,8 +3300,51 @@ export default function AIAssistant() {
       }
     }
 
+    // Cart quantity changes are high-confidence, local intents. Dispatch
+    // them before Gemini so a model refusal or a transient intent failure
+    // cannot turn "cart me quantity plus 5" into a collection navigation.
+    const directQuantityChange = parseCartQuantityChange(normalizedText);
+    if (directQuantityChange) {
+      const cartProductIds = Object.keys(cartItems || {}).filter((productId) =>
+        Object.values(cartItems[productId] || {}).some((quantity) => quantity > 0),
+      );
+      const refersToCartItem =
+        /\b(cart|bag)\b.{0,50}\b(product|item|quantity|amount)\b/i.test(
+          normalizedText,
+        ) ||
+        /\b(product|item|quantity|amount)\b.{0,50}\b(cart|bag)\b/i.test(
+          normalizedText,
+        ) ||
+        /कार्ट|बैग|प्रोडक्ट|आइटम|क्वांटिटी|मात्रा/.test(normalizedText);
+
+      if (refersToCartItem && cartProductIds.length > 1) {
+        const clarification =
+          "Aapke cart mein ek se zyada products hain. Kis product ki quantity badhaun?";
+        pendingActionRef.current = {
+          type: "clarification",
+          history: conversationHistory.slice(-6),
+        };
+        setCurrentAction("Awaiting cart product");
+        setAiReply(clarification);
+        speakText(clarification);
+        pushHistory("assistant", clarification);
+        return clarification;
+      }
+
+      const directResponse = runTool(
+        "update_cart_quantity",
+        { query: normalizedText, ...directQuantityChange },
+        normalizedText,
+      );
+      pushHistory("assistant", directResponse || "Cart quantity updated");
+      return directResponse;
+    }
+
     // No tool exists for these on the backend at all - blocked before any
     // AI call so the assistant can never imply it performed the action.
+    // This runs after the explicit cart-quantity branch so phrases such as
+    // "change the quantity of my cart product" are not mistaken for a
+    // request to edit the catalog itself.
     if (isDestructiveRequest(normalizedText)) {
       const blockedMessage =
         "I cannot perform that action. I can only help with browsing, search, recommendations, and navigation.";
@@ -3194,6 +3393,8 @@ export default function AIAssistant() {
         normalizedText,
         toolCall.rag || null,
       );
+    } else if (toolCall?.rag?.answer) {
+      assistantResponse = respondWithGroundedAnswer(toolCall.rag, normalizedText);
     } else if (toolCall?.reply && toolCall.replyType === "clarification") {
       // The model had live UI context but couldn't confidently resolve an
       // ambiguous reference (e.g. "open this") - ask the clarifying
@@ -3293,15 +3494,11 @@ export default function AIAssistant() {
     recognition.onresult = (event) => {
       clearSilenceTimer();
 
-      // See ECHO_GUARD_MS_RECOGNITION's declaration - discard results that
-      // are most likely the assistant's own voice echoing back through the
-      // mic instead of the customer, rather than treating them as a command.
-      if (
-        isSpeakingRef.current ||
-        Date.now() - lastSpeakEndTimeRef.current < ECHO_GUARD_MS_RECOGNITION
-      ) {
-        return;
-      }
+      // Ignore the opening greeting and every native result while Zara is
+      // speaking. Browser recognition can emit short or garbled echo
+      // fragments that text comparison cannot reliably identify, so this
+      // conservative gate prevents a self-sustaining speak/recognize loop.
+      if (suppressBargeInRef.current || isSpeakingRef.current) return;
 
       let finalText = "";
       let interimText = "";
@@ -3317,6 +3514,12 @@ export default function AIAssistant() {
         } else {
           interimText += chunk;
         }
+      }
+
+      // Discard browser-buffered audio immediately after playback too. This
+      // covers the echo tail that may arrive after isSpeaking becomes false.
+      if (Date.now() - lastSpeakEndTimeRef.current < ECHO_GUARD_MS_RECOGNITION) {
+        return;
       }
 
       // See ECHO_SUBSTRING_GUARD_MS's declaration - a slow cloud-STT round
@@ -3407,7 +3610,8 @@ export default function AIAssistant() {
       // recognition again, leaving two competing capture paths active.
       if (
         listeningSessionRef.current &&
-        voiceModeRef.current === "recognition"
+        voiceModeRef.current === "recognition" &&
+        !capturePausedForSpeechRef.current
       ) {
         try {
           recognition.start();
@@ -3644,6 +3848,9 @@ export default function AIAssistant() {
 
   const handleAssistantClick = () => {
     if (!open) {
+      // Safari requires the playback context to be activated by the same
+      // user gesture that opens the assistant, before any network wait.
+      ensurePlaybackAudioContext();
       setOpen(true);
       setRippleSeq((seq) => seq + 1);
 
