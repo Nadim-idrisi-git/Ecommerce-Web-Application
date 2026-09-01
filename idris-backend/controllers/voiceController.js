@@ -1,4 +1,5 @@
 import { GoogleGenAI, Modality } from "@google/genai";
+import { callGeminiWithRetry } from "../utils/callGeminiWithRetry.js";
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
@@ -28,7 +29,20 @@ export const transcribeAudio = async (req, res) => {
 
     const audioData = req.file.buffer.toString("base64");
 
-    const response = await ai.models.generateContent({
+    // Same bounded timeout+retry every other generateContent call site uses
+    // (see callGeminiWithRetry.js) - this one was missed, leaving the
+    // speech-to-text step (every voice command goes through this first)
+    // with no protection against a transient hiccup, silently failing the
+    // whole voice turn instead of getting one bounded retry.
+    //
+    // Uses a longer per-attempt timeout than the default (12s, calibrated
+    // for short text-only prompts like chat/intent) - transcribing actual
+    // audio content consistently took longer than that in practice (this
+    // call kept hitting the 12s ceiling and retrying every single time,
+    // confirmed by comparing against agentOrchestrator's text-only calls
+    // completing in 5-7s on the same requests), not just occasionally
+    // under load.
+    const response = await callGeminiWithRetry(() => ai.models.generateContent({
       model: "gemini-3.6-flash",
       contents: [
         {
@@ -60,7 +74,7 @@ Rules:
       // benefit, and every voice turn waits on this call before it can even
       // start routing/answering.
       config: { thinkingConfig: { thinkingLevel: "low" } },
-    });
+    }), { timeoutMs: 20000 });
 
     const transcript =
       response.text?.trim() ||
@@ -97,23 +111,21 @@ Rules:
 // broken in a live voice conversation. This runs as a single request/
 // response (not a persistent WebSocket) so it stays deployable as a normal
 // serverless function.
-export const streamSpeech = async (req, res) => {
-  const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
-
-  if (!text) {
-    return res.status(400).json({
-      success: false,
-      message: "Text is required",
-    });
-  }
-
-  if (text.length > MAX_SPEECH_TEXT_LENGTH) {
-    return res.status(400).json({
-      success: false,
-      message: "Text is too long to speak",
-    });
-  }
-
+// One connect+stream attempt against the Live API. Resolves once this
+// attempt's session concludes one way or another - {wroteAnyAudio: true}
+// once fully streamed and response ended, or {wroteAnyAudio: false} if the
+// session closed/errored/timed out without ever producing audio (the caller
+// decides whether that's worth a retry). Never rejects - a connect-time
+// failure is reported the same way as a zero-audio session, since both are
+// equally retryable and the caller doesn't need to tell them apart.
+// finishHolder.current is set to this attempt's own finish() the instant
+// it's created, so streamSpeech's req "close" handler can force-close the
+// *live* Gemini session immediately on client disconnect (barge-in aborts
+// the frontend's fetch constantly) rather than leaving it running for up
+// to hardTimeout's 20s for no reason - wasted concurrent Live sessions
+// piling up is exactly the kind of thing that feeds rate/concurrency
+// limits, which is part of what the retry above is defending against.
+const attemptSpeechStream = (text, res, isClientClosed, finishHolder) => new Promise((resolve) => {
   let session = null;
   let finished = false;
   let wroteAnyAudio = false;
@@ -127,35 +139,18 @@ export const streamSpeech = async (req, res) => {
     } catch {
       // Session may already be closed.
     }
-
-    // The client (fetch abort, navigation, tab close) may have already
-    // disconnected - writing to a closed/destroyed socket would throw.
-    if (res.writableEnded || res.destroyed) return;
-
-    try {
-      if (!wroteAnyAudio && !res.headersSent) {
-        res.status(502).json({
-          success: false,
-          message: "No audio generated",
-        });
-        return;
-      }
-
-      res.end();
-    } catch {
-      // Client already gone.
-    }
+    resolve({ wroteAnyAudio });
   };
 
-  // Upper bound on total session lifetime regardless of how the stream
-  // progresses, so a stuck/hung Live session can't hold the connection open
-  // indefinitely.
+  finishHolder.current = finish;
+
+  // Upper bound on this attempt's lifetime so a stuck/hung Live session
+  // can't hold things up indefinitely - each retry gets its own fresh
+  // budget rather than sharing one across attempts.
   const hardTimeout = setTimeout(finish, 20000);
 
-  req.on("close", finish);
-
-  try {
-    session = await ai.live.connect({
+  ai.live
+    .connect({
       model: "gemini-3.1-flash-live-preview",
       config: {
         responseModalities: [Modality.AUDIO],
@@ -166,7 +161,7 @@ export const streamSpeech = async (req, res) => {
       },
       callbacks: {
         onmessage: (message) => {
-          if (finished) return;
+          if (finished || isClientClosed()) return;
 
           const parts = message.serverContent?.modelTurn?.parts || [];
 
@@ -188,6 +183,7 @@ export const streamSpeech = async (req, res) => {
             message.serverContent?.generationComplete ||
             message.serverContent?.turnComplete
           ) {
+            if (wroteAnyAudio) res.end();
             finish();
           }
         },
@@ -197,20 +193,80 @@ export const streamSpeech = async (req, res) => {
         },
         onclose: finish,
       },
+    })
+    .then((connectedSession) => {
+      if (finished) {
+        // Client disconnected or timed out while connect() was still
+        // resolving - nothing left to send to.
+        try {
+          connectedSession.close();
+        } catch {
+          // Already closed.
+        }
+        return;
+      }
+      session = connectedSession;
+      session.sendClientContent({ turns: text, turnComplete: true });
+    })
+    .catch((error) => {
+      console.error("Speech stream setup error:", error);
+      finish();
     });
+});
 
-    session.sendClientContent({ turns: text, turnComplete: true });
-  } catch (error) {
-    console.error("Speech stream setup error:", error);
-    clearTimeout(hardTimeout);
+export const streamSpeech = async (req, res) => {
+  const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
 
-    if (!res.headersSent) {
-      return res.status(500).json({
-        success: false,
-        message: "Failed to synthesize speech",
-      });
-    }
+  if (!text) {
+    return res.status(400).json({
+      success: false,
+      message: "Text is required",
+    });
+  }
 
-    finish();
+  if (text.length > MAX_SPEECH_TEXT_LENGTH) {
+    return res.status(400).json({
+      success: false,
+      message: "Text is too long to speak",
+    });
+  }
+
+  let clientClosed = false;
+  // .current points at whichever attempt is currently in flight's own
+  // finish() - see attemptSpeechStream's declaration for why this needs to
+  // force-close the live session immediately rather than waiting on that
+  // attempt's own hardTimeout.
+  const finishHolder = { current: null };
+  req.on("close", () => {
+    clientClosed = true;
+    finishHolder.current?.();
+  });
+
+  // MODULE 15-style bounded retry (same philosophy as callGeminiWithRetry.js,
+  // adapted for this callback-driven streaming API rather than a single
+  // promise): a Live session occasionally closes/errors without ever
+  // producing audio - a transient connect hiccup or a momentary rate/
+  // concurrency limit, not a deterministic failure - which previously gave
+  // up immediately and 502'd the whole voice reply. Retrying is only safe
+  // because nothing has been written to the client yet (headers are only
+  // sent once real audio arrives), and this was the one Gemini call site in
+  // the backend with no reliability wrapper at all.
+  const MAX_ATTEMPTS = 2;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    if (clientClosed || res.writableEnded || res.destroyed) return;
+
+    // eslint-disable-next-line no-await-in-loop
+    const { wroteAnyAudio } = await attemptSpeechStream(text, res, () => clientClosed, finishHolder);
+
+    if (wroteAnyAudio) return;
+    if (clientClosed || res.writableEnded || res.destroyed) return;
+  }
+
+  if (!res.headersSent) {
+    res.status(502).json({
+      success: false,
+      message: "No audio generated",
+    });
   }
 };

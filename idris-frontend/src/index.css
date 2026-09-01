@@ -12,7 +12,17 @@ a.active hr {
 *{
   font-family: Outfit;
 }
-html, body {
+/* Only html, not body - setting overflow-x on both makes each one's
+   overflow-y independently compute to auto (the browser-forced pairing
+   for any non-visible/visible axis combination), so body becomes a second
+   "scrolling ancestor" whose scrollTop never actually moves (the real
+   page scroll happens on html, confirmed via document.scrollingElement).
+   A sticky descendant resolves against the nearest such ancestor, which
+   was body, not the element that's actually scrolling - breaking
+   position: sticky entirely. Keeping this on html alone still fully
+   prevents horizontal scroll, with only one (correctly-scrolling)
+   ancestor for sticky to resolve against. */
+html {
   overflow-x: hidden;
 }
 .prata-regular {

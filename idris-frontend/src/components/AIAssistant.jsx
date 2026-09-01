@@ -334,13 +334,20 @@ export default function AIAssistant() {
   // onspeechstart comment) - a direct read of the isSpeaking state variable
   // there would forever see whatever it was when recognition was first
   // created, not its current value. Also used by the MediaRecorder/VAD
-  // path's echo guard (see ECHO_GUARD_MS), where a plain ref is just the
-  // simplest way to read this synchronously inside the rAF tick loop.
-  // Kept in sync by the effect below.
+  // path's echo guard (see ECHO_GUARD_MS_MEDIA/ECHO_GUARD_MS_RECOGNITION),
+  // where a plain ref is just the simplest way to read this synchronously
+  // inside the rAF tick loop. Kept in sync by the effect below.
   const isSpeakingRef = useRef(false);
   // Timestamp of the last time speaking actually stopped (naturally or via
-  // barge-in) - see ECHO_GUARD_MS's declaration for why.
+  // barge-in) - see ECHO_GUARD_MS_MEDIA/ECHO_GUARD_MS_RECOGNITION's
+  // declaration for why.
   const lastSpeakEndTimeRef = useRef(0);
+  // The text of whatever speakText() call is most recent (reply or
+  // greeting) - see ECHO_SUBSTRING_GUARD_MS's declaration for why.
+  const lastSpokenTextRef = useRef("");
+  // Failsafe for isSpeaking getting stuck true forever - see its own
+  // declaration at the top of speakText for why that's possible.
+  const speakingWatchdogRef = useRef(null);
   // Fires once whatever speakText() call is currently playing actually
   // finishes (naturally, on error, or via an interrupting stopSpeaking()) -
   // set by speakText() itself, consumed+cleared by whichever completion path
@@ -449,6 +456,19 @@ export default function AIAssistant() {
   const liveNextStartTimeRef = useRef(0);
   const livePendingSourcesRef = useRef([]);
   const liveAbortControllerRef = useRef(null);
+  // The actual output route for streamed speech - see its creation in
+  // speakText for why playing through a real <audio> element (via this
+  // MediaStreamAudioDestinationNode) instead of connecting straight to
+  // audioContext.destination matters for cross-browser self-echo.
+  const liveMediaStreamDestinationRef = useRef(null);
+  const speechAudioElRef = useRef(null);
+  // Whether the /api/voice/speak network stream itself has finished
+  // delivering chunks for the current generation - see playPcmChunk's
+  // onended for why this has to be tracked separately from
+  // livePendingSourcesRef being empty (a slow/jittery mobile connection
+  // routinely finishes playing one chunk before the next has arrived,
+  // which isn't the same thing as the reply actually being over).
+  const streamFinishedRef = useRef(true);
   // Bumped on every stopSpeaking()/speakText() call so a stream that's still
   // arriving after being superseded (stopped, or replaced by a newer
   // utterance) knows to stop scheduling further audio.
@@ -496,6 +516,32 @@ export default function AIAssistant() {
   const isBraveBrowser = () =>
     Boolean(window.navigator.brave) ||
     /Brave/i.test(window.navigator.userAgent || "");
+
+  // Chrome Desktop/Android only - excludes CriOS (Chrome on iOS, which is
+  // actually WebKit/Safari under the hood per Apple's platform rules, so it
+  // already behaves like Safari) and Edge (Edg/, out of scope - not reported
+  // broken, and this keeps the fix's blast radius to exactly the browsers it
+  // was asked for).
+  //
+  // Used in startRecording/ensureRecognition to route Chrome to the
+  // MediaRecorder voice path (see voiceModeRef/startMediaRecorderSession)
+  // instead of native SpeechRecognition. This isn't a preference - Chrome's
+  // SpeechRecognition captures the mic through its own internal, browser-
+  // managed audio pipeline that takes no constraints at all (no
+  // echoCancellation, nothing a page can set), entirely separate from any
+  // getUserMedia stream the page opens. So no amount of AEC applied to a
+  // page-side stream ever reaches what SpeechRecognition itself transcribes -
+  // that pipeline has no cancellation reference for the assistant's own TTS
+  // and will keep hearing it regardless. The MediaRecorder path doesn't have
+  // that problem: it's built entirely on a getUserMedia stream the page
+  // controls directly, so echoCancellation actually applies to the audio
+  // that gets transcribed. Safari has the same SpeechRecognition limitation,
+  // but per the user it isn't misfiring there, so it's left on its existing
+  // path rather than risking a regression on a browser that already works.
+  const isChromeBrowser = () =>
+    !isBraveBrowser() &&
+    /Chrome\//i.test(window.navigator.userAgent || "") &&
+    !/Edg\//i.test(window.navigator.userAgent || "");
 
   useEffect(() => {
     return () => {
@@ -655,7 +701,28 @@ export default function AIAssistant() {
   // recording once the customer has spoken and then gone quiet for
   // SPEECH_END_SILENCE_MS, so a Brave session doesn't have to be manually
   // stopped after every single utterance. Returns a cleanup function.
-  const startVoiceActivityMonitor = (stream, onUtteranceEnd) => {
+  const VOLUME_THRESHOLD = 0.035;
+
+  // allowInterruptWhileSpeaking (Chrome only - see isChromeBrowser and its
+  // call site in startMediaRecorderSession): the isSpeakingRef gates just
+  // below predate the assistant's TTS being routed through a real <audio>
+  // element (see speakText/playPcmChunk), which is what actually gives
+  // getUserMedia's echoCancellation constraint on this same stream a
+  // reference to cancel against. Before that fix, volume crossing the
+  // threshold while she was speaking was routinely her own uncancelled
+  // voice, so treating it as "someone started talking" self-triggered an
+  // endless loop - hence suppressing it entirely while isSpeakingRef was
+  // true. With that AEC reference now actually in place, sustained volume
+  // on this stream while she's speaking is acoustically expected to be a
+  // real second source, not her echo - so for Chrome specifically, this
+  // stops suppressing it and lets it drive both an immediate barge-in
+  // cutoff and normal utterance detection, instead of only reacting once
+  // she's done talking.
+  const startVoiceActivityMonitor = (
+    stream,
+    onUtteranceEnd,
+    { allowInterruptWhileSpeaking = false } = {},
+  ) => {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (typeof AudioContextClass === "undefined") return () => {};
 
@@ -672,7 +739,6 @@ export default function AIAssistant() {
     source.connect(analyser);
 
     const buffer = new Uint8Array(analyser.frequencyBinCount);
-    const VOLUME_THRESHOLD = 0.035;
     let rafId = null;
     let stopped = false;
     // When the volume most recently crossed VOLUME_THRESHOLD - null while
@@ -692,27 +758,23 @@ export default function AIAssistant() {
       }
 
       if (Math.sqrt(sumSquares / buffer.length) > VOLUME_THRESHOLD) {
-        stopSpeaking();
+        // See allowInterruptWhileSpeaking's declaration above - browsers
+        // without a confirmed AEC reference for her own TTS keep the old
+        // "only once she's already done talking" behavior; Chrome, which
+        // does have one, gets real-time barge-in instead.
+        if (allowInterruptWhileSpeaking || !isSpeakingRef.current) {
+          stopSpeaking();
+        }
         clearSilenceTimer();
 
         if (onUtteranceEnd) {
-          // Ignore volume for utterance-detection purposes while the
-          // assistant is speaking, or shortly after (see ECHO_GUARD_MS) -
-          // its own voice coming back through the mic would otherwise get
-          // treated as the customer talking, recorded, and sent off to be
-          // "answered," which speaks another reply that gets picked up
-          // again - a self-triggering loop. getUserMedia's
-          // echoCancellation isn't a guaranteed fix here since the
-          // assistant's replies play through the raw Web Audio API rather
-          // than a standard <audio> element, which browser echo
-          // cancellation isn't guaranteed to track as a reference signal.
-          // stopSpeaking() above still runs unconditionally, so a genuine
-          // interruption still cuts the assistant off immediately even
-          // though it won't be captured as the next command until this
-          // window passes.
+          // See allowInterruptWhileSpeaking's declaration - skipped
+          // entirely for Chrome, where volume during her own speech is
+          // trusted as genuine rather than assumed to be her echo.
           const inEchoWindow =
-            isSpeakingRef.current ||
-            Date.now() - lastSpeakEndTimeRef.current < ECHO_GUARD_MS;
+            !allowInterruptWhileSpeaking &&
+            (isSpeakingRef.current ||
+              Date.now() - lastSpeakEndTimeRef.current < ECHO_GUARD_MS_MEDIA);
 
           if (inEchoWindow) {
             aboveThresholdSince = null;
@@ -775,6 +837,13 @@ export default function AIAssistant() {
   // Called from every real completion path (natural end, error, or an
   // interrupting stopSpeaking()) so it always fires exactly once per call.
   const fireSpeechEndCallback = () => {
+    // Every real completion path routes through here (see speakText's
+    // watchdog declaration) - clearing it here means the failsafe timer
+    // never actually fires in the normal case, only when nothing else did.
+    if (speakingWatchdogRef.current) {
+      clearTimeout(speakingWatchdogRef.current);
+      speakingWatchdogRef.current = null;
+    }
     const pendingSpeechEndCb = speechEndCallbackRef.current;
     speechEndCallbackRef.current = null;
     pendingSpeechEndCb?.();
@@ -804,6 +873,12 @@ export default function AIAssistant() {
     if (liveAudioContextRef.current) {
       liveAudioContextRef.current.close().catch(() => {});
       liveAudioContextRef.current = null;
+    }
+
+    liveMediaStreamDestinationRef.current = null;
+    if (speechAudioElRef.current) {
+      speechAudioElRef.current.pause();
+      speechAudioElRef.current.srcObject = null;
     }
 
     liveNextStartTimeRef.current = 0;
@@ -877,7 +952,12 @@ export default function AIAssistant() {
 
     const source = audioContext.createBufferSource();
     source.buffer = audioBuffer;
-    source.connect(audioContext.destination);
+    // Through the MediaStreamAudioDestinationNode + <audio> element set up
+    // in speakText when available (see its declaration for why), not
+    // straight to audioContext.destination - falls back to the old direct
+    // route only if that setup somehow didn't happen (audio element not
+    // mounted yet, createMediaStreamDestination unsupported).
+    source.connect(liveMediaStreamDestinationRef.current || audioContext.destination);
 
     const startAt = Math.max(
       liveNextStartTimeRef.current,
@@ -893,7 +973,8 @@ export default function AIAssistant() {
       );
       if (
         generation === liveGenerationRef.current &&
-        livePendingSourcesRef.current.length === 0
+        livePendingSourcesRef.current.length === 0 &&
+        streamFinishedRef.current
       ) {
         setIsSpeaking(false);
         // Back to genuinely idle-and-waiting - restart the "are you still
@@ -916,9 +997,46 @@ export default function AIAssistant() {
   const speakText = async (text, { onSpeechEnd } = {}) => {
     if (!text) return;
 
+    // stopSpeaking() below fires audioContext.close() without awaiting it
+    // (it's called from sync event handlers - onspeechstart, etc. - that
+    // can't await), so the old context can still be mid-close when a new
+    // one gets created right after. Awaiting the *same* context's close()
+    // here is safe even if it's already mid-close - repeated close() calls
+    // on one context all resolve once it's actually closed (Web Audio API
+    // spec), so this just guarantees the old one is fully gone before a new
+    // one is created. Without this, a rapid run of replies (the self-echo
+    // barge-in loop this session already fixed, or genuine rapid-fire
+    // turns) could pile up AudioContexts faster than they close, which is
+    // exactly what surfaces as Chrome's "AudioContext encountered an error
+    // from the audio device" - most browsers cap concurrently-open contexts.
+    const previousAudioContext = liveAudioContextRef.current;
     stopSpeaking();
+    if (previousAudioContext) {
+      await previousAudioContext.close().catch(() => {});
+    }
     speechEndCallbackRef.current = onSpeechEnd || null;
+    lastSpokenTextRef.current = text;
     const generation = liveGenerationRef.current;
+
+    // Failsafe: every normal completion path (natural end, error, an
+    // interrupting stopSpeaking()) reliably flips isSpeaking back to false -
+    // except a silent Web Audio hardware failure ("AudioContext encountered
+    // an error from the audio device"), which can leave a scheduled chunk's
+    // onended simply never firing, with no JS exception to catch either.
+    // Since the rest of the app treats isSpeaking as gospel for whether the
+    // customer can be heard (the entire echo-guard logic above depends on
+    // it going back to false), that failure mode wedges the assistant into
+    // permanently ignoring everything the customer says, recoverable only
+    // by reloading - exactly what "stopped listening" looks like from
+    // outside. This is a pure backstop: cleared by fireSpeechEndCallback
+    // the instant any real completion path fires, so it never fires in the
+    // normal case, only when nothing else has recovered after a generous
+    // upper bound on how long any single reply could legitimately take.
+    if (speakingWatchdogRef.current) clearTimeout(speakingWatchdogRef.current);
+    speakingWatchdogRef.current = setTimeout(() => {
+      speakingWatchdogRef.current = null;
+      if (generation === liveGenerationRef.current) stopSpeaking();
+    }, 45000);
     // Flip immediately rather than waiting for the first streamed audio
     // chunk (~1.2-1.6s away) - otherwise the UI sits in the idle state for
     // that entire window even though the assistant has already committed
@@ -936,7 +1054,13 @@ export default function AIAssistant() {
 
     const controller = new AbortController();
     liveAbortControllerRef.current = controller;
-    const safetyTimeout = setTimeout(() => controller.abort(), 25000);
+    // The backend's own streamSpeech now retries once (two full Live-session
+    // attempts, each with a 20s budget = ~40s worst case) rather than
+    // failing outright on the first zero-audio session - this needs enough
+    // margin over that or the client aborts before the server's retry can
+    // succeed, same mismatch as getAssistantTool's/sendTranscriptToAI's
+    // timeouts above.
+    const safetyTimeout = setTimeout(() => controller.abort(), 45000);
 
     try {
       const response = await fetch(`${backendUrl}/api/voice/speak`, {
@@ -960,9 +1084,34 @@ export default function AIAssistant() {
         await audioContext.resume().catch(() => {});
       }
 
+      // Play through a real <audio> element instead of connecting the
+      // synthesized voice straight to audioContext.destination. This is the
+      // actual fix for why the assistant hears (and cuts off/replies to)
+      // its own voice far more on Chrome/Brave than Safari: getUserMedia's
+      // echoCancellation constraint can only cancel an output it can
+      // reference, and browser AEC implementations are built around
+      // treating <audio>/<video> element playback as that reference -
+      // audio routed straight to a raw AudioContext destination, with no
+      // element involved, isn't reliably picked up as one. Every fix so far
+      // this session (the isSpeakingRef guards, the substring echo check)
+      // only filtered the symptom after the fact; this addresses the actual
+      // acoustic bleed those were compensating for. Safe to no-op on a
+      // browser without createMediaStreamDestination - playPcmChunk falls
+      // back to the old direct connection in that case.
+      if (typeof audioContext.createMediaStreamDestination === "function") {
+        const destinationNode = audioContext.createMediaStreamDestination();
+        liveMediaStreamDestinationRef.current = destinationNode;
+
+        if (speechAudioElRef.current) {
+          speechAudioElRef.current.srcObject = destinationNode.stream;
+          await speechAudioElRef.current.play().catch(() => {});
+        }
+      }
+
       const reader = response.body.getReader();
       let pendingByte = null;
       let receivedAny = false;
+      streamFinishedRef.current = false;
 
       for (;;) {
         const { done, value } = await reader.read();
@@ -1000,10 +1149,20 @@ export default function AIAssistant() {
         playPcmChunk(audioContext, bytes, generation);
       }
 
+      // The stream is done delivering chunks - playPcmChunk's onended can
+      // now treat "no sources left playing" as the reply actually being
+      // over, rather than just a gap waiting for the next chunk.
+      if (generation === liveGenerationRef.current) {
+        streamFinishedRef.current = true;
+      }
+
       if (!receivedAny && generation === liveGenerationRef.current) {
         throw new Error("No audio received");
       }
     } catch (error) {
+      if (generation === liveGenerationRef.current) {
+        streamFinishedRef.current = true;
+      }
       if (generation !== liveGenerationRef.current) return;
       console.error(
         "Streamed voice failed, falling back to browser voice:",
@@ -1044,15 +1203,67 @@ export default function AIAssistant() {
   // loop that looks exactly like "thinking again, speaking again" with no
   // one talking. Neither path's echo cancellation is a guaranteed fix -
   // SpeechRecognition's depends on the OS/browser's own implementation
-  // (Safari's isn't reliable here), and MediaRecorder's getUserMedia
-  // echoCancellation isn't guaranteed to track the assistant's replies as a
-  // reference signal since they play through the raw Web Audio API rather
-  // than a standard <audio> element. Speech detected while the assistant is
-  // speaking, or within this window right after it stops (covering the
-  // echo tail, and the brief lag before a barge-in's stopSpeaking() call
-  // has actually silenced the audio), is treated as suspected echo and
-  // ignored rather than treated as the next command.
-  const ECHO_GUARD_MS = 500;
+  // (Safari's isn't reliable here), and even with replies now routed
+  // through a real <audio> element (see speakText) so echoCancellation has
+  // an actual reference to work against, it's still not guaranteed to fully
+  // cancel it - room reverb and mic distance mean what leaks back through
+  // is often imperfectly transcribed (not a clean match of what was
+  // actually said), which is also why ECHO_SUBSTRING_GUARD_MS's exact-text
+  // check alone isn't sufficient - a purely time-based guard doesn't care
+  // whether the echoed transcript is garbled, only when it arrived. Speech
+  // detected while the assistant is speaking, or within this window right
+  // after it stops (covering the echo tail, and the brief lag before a
+  // barge-in's stopSpeaking() call has actually silenced the audio), is
+  // treated as suspected echo and ignored rather than treated as the next
+  // command.
+  //
+  // Split into two separate durations, NOT one shared constant - a single
+  // 1200ms value here briefly regressed the MediaRecorder/VAD path (Brave):
+  // it made a customer's short reply spoken soon after the assistant
+  // finishes (very common - right after the greeting, especially) fall
+  // *entirely* inside the echo window, so utteranceSpeechDetectedRef never
+  // got set and nothing was ever sent - total silence, not just occasional
+  // missed echo. Chrome's recognition path needs the longer window (its
+  // self-echo comes from slow cloud-STT round trips, see
+  // ECHO_SUBSTRING_GUARD_MS below), but the VAD path's own echo signal is
+  // local mic-volume sampling with no such network lag, so it doesn't need
+  // - and can't afford - the same margin.
+  const ECHO_GUARD_MS_MEDIA = 500;
+  const ECHO_GUARD_MS_RECOGNITION = 1200;
+
+  // A second, longer-running echo defense for what ECHO_GUARD_MS_RECOGNITION
+  // alone misses: on a real network (mobile data especially), Chrome's cloud
+  // speech recognizer can take well over 500ms to return a "final" result -
+  // long enough that the assistant's own trailing words, still working
+  // their way through that pipeline, get transcribed and land in onresult
+  // *after* the hard time-based gate above has already closed. Since what
+  // leaks through is coherent speech (the assistant's own words, not noise
+  // Chrome would normally reject), a plain timer can't filter it - but its
+  // content can: it'll be a near-verbatim match of whatever was just spoken.
+  // Only checked within this window so a genuinely new command from the
+  // customer that happens to reuse a word or two from an old reply isn't
+  // misread as echo once real conversation has moved on.
+  const ECHO_SUBSTRING_GUARD_MS = 4000;
+  const MIN_ECHO_SUBSTRING_LENGTH = 8;
+
+  const normalizeForEchoCompare = (text) =>
+    (text || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const isLikelySelfEcho = (candidateText) => {
+    if (Date.now() - lastSpeakEndTimeRef.current >= ECHO_SUBSTRING_GUARD_MS) {
+      return false;
+    }
+
+    const normalizedCandidate = normalizeForEchoCompare(candidateText);
+    if (normalizedCandidate.length < MIN_ECHO_SUBSTRING_LENGTH) return false;
+
+    const normalizedReply = normalizeForEchoCompare(lastSpokenTextRef.current);
+    return normalizedReply.includes(normalizedCandidate);
+  };
 
   const schedulePauseResponse = () => {
     clearPauseTimer();
@@ -2582,7 +2793,13 @@ export default function AIAssistant() {
                 method: "POST",
                 body: formData,
               },
-              12000,
+              // The backend's own Gemini call here uses a 20s per-attempt
+              // timeout (longer than the 12s default - transcribing actual
+              // audio content consistently needs more than that) with one
+              // retry = ~40.4s worst case. This needs enough margin over
+              // that or the client gives up and aborts right as the
+              // server's retry might have been about to succeed.
+              48000,
             );
 
             const data = await response.json();
@@ -2594,6 +2811,16 @@ export default function AIAssistant() {
             text = data.transcript.trim();
           } else {
             setStatus("thinking");
+          }
+
+          // Same self-echo defense as recognition.onresult (see
+          // ECHO_SUBSTRING_GUARD_MS's declaration) - this path's own
+          // transcription round trip through /api/voice/transcribe can
+          // similarly land after the hard echo-guard window has closed,
+          // and what leaks through here is just as likely to be the
+          // assistant's own recorded words rather than the customer's.
+          if (text && isLikelySelfEcho(text)) {
+            text = "";
           }
 
           await processVoiceTextRef.current(text);
@@ -2727,12 +2954,16 @@ export default function AIAssistant() {
     };
 
     vadCleanupRef.current?.();
-    vadCleanupRef.current = startVoiceActivityMonitor(stream, () => {
-      const recorder = mediaRecorderRef.current;
-      if (recorder && recorder.state === "recording") {
-        recorder.stop();
-      }
-    });
+    vadCleanupRef.current = startVoiceActivityMonitor(
+      stream,
+      () => {
+        const recorder = mediaRecorderRef.current;
+        if (recorder && recorder.state === "recording") {
+          recorder.stop();
+        }
+      },
+      { allowInterruptWhileSpeaking: isChromeBrowser() },
+    );
 
     startRecorderCycle();
   };
@@ -2962,7 +3193,10 @@ export default function AIAssistant() {
   });
 
   const ensureRecognition = () => {
-    if (isBraveBrowser()) return null;
+    // See isChromeBrowser's declaration - Chrome is routed to the
+    // MediaRecorder path the same as Brave, so this never even constructs a
+    // SpeechRecognition object for it.
+    if (isBraveBrowser() || isChromeBrowser()) return null;
 
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -2992,7 +3226,7 @@ export default function AIAssistant() {
     // exception. isSpeakingRef is read the same way and for the same reason:
     // on a phone the speaker's own output bleeds straight into the mic (no
     // reliable echo cancellation for the raw Web Audio API playback path -
-    // see ECHO_GUARD_MS's declaration), so onspeechstart fires on the
+    // see ECHO_GUARD_MS_RECOGNITION's declaration), so onspeechstart fires on the
     // assistant's own voice on every reply, not just the greeting, cutting
     // it off immediately and repeating every turn. Skipping it while
     // isSpeakingRef is true doesn't disable real barge-in - onresult below
@@ -3011,12 +3245,12 @@ export default function AIAssistant() {
     recognition.onresult = (event) => {
       clearSilenceTimer();
 
-      // See ECHO_GUARD_MS's declaration - discard results that are most
-      // likely the assistant's own voice echoing back through the mic
-      // instead of the customer, rather than treating them as a command.
+      // See ECHO_GUARD_MS_RECOGNITION's declaration - discard results that
+      // are most likely the assistant's own voice echoing back through the
+      // mic instead of the customer, rather than treating them as a command.
       if (
         isSpeakingRef.current ||
-        Date.now() - lastSpeakEndTimeRef.current < ECHO_GUARD_MS
+        Date.now() - lastSpeakEndTimeRef.current < ECHO_GUARD_MS_RECOGNITION
       ) {
         return;
       }
@@ -3035,6 +3269,16 @@ export default function AIAssistant() {
         } else {
           interimText += chunk;
         }
+      }
+
+      // See ECHO_SUBSTRING_GUARD_MS's declaration - a slow cloud-STT round
+      // trip can deliver the assistant's own trailing words as a "final"
+      // result after the hard time gate above has already closed. Checked
+      // per-chunk (not on the whole accumulated buffer) since a real
+      // command often starts before this window closes and would otherwise
+      // never itself look like a substring of the old reply.
+      if (finalText.trim() && isLikelySelfEcho(finalText)) {
+        finalText = "";
       }
 
       // Chrome's recognizer fires a separate final result at every natural
@@ -3132,7 +3376,9 @@ export default function AIAssistant() {
             message: text,
           }),
         },
-        20000,
+        // Same reasoning as getAssistantTool's timeout below - the backend's
+        // own Gemini call here has a ~24.4s worst-case retry budget now.
+        30000,
       );
 
       const data = await response.json();
@@ -3195,7 +3441,17 @@ export default function AIAssistant() {
           recentActivity: memoryRef.current.activityLog,
         }),
       },
-      15000,
+      // The backend's tool-selection Gemini call has a bounded retry
+      // (callGeminiWithRetry: 12s timeout + one retry = ~24.4s worst case),
+      // and an orchestrated tool (search/recommend/compare) can chain one
+      // or two more calls with the same budget on top of that. 15000 here
+      // meant the client gave up - with an AbortError, not a real failure -
+      // before the server's own retry had a chance to succeed; this is
+      // exactly what caused "place my order" to wrongly fail with an
+      // AbortError and fall back to a generic can't-help reply, even though
+      // the backend would very likely have answered correctly a moment
+      // later.
+      32000,
     );
 
     const data = await response.json();
@@ -3235,7 +3491,13 @@ export default function AIAssistant() {
       clearPauseTimer();
       recognizedTextBufferRef.current = "";
       hadSpeechRef.current = false;
-      voiceModeRef.current = isBraveBrowser() ? "media" : "recognition";
+      // Chrome routes through the same MediaRecorder/getUserMedia path as
+      // Brave - see isChromeBrowser's declaration for why native
+      // SpeechRecognition can't be trusted for either of them (Brave
+      // disables/limits it outright; Chrome's has no echo-cancellation
+      // reference for the assistant's own TTS).
+      voiceModeRef.current =
+        isBraveBrowser() || isChromeBrowser() ? "media" : "recognition";
       setTranscript("");
       setAiReply("");
 
@@ -3945,6 +4207,11 @@ export default function AIAssistant() {
           {!open && <span className="idris-ai-tooltip">Ask AI</span>}
         </button>
       </div>
+
+      {/* Actual output route for streamed speech - see its creation in
+          speakText for why. Not visually rendered, but must stay a real
+          mounted element for srcObject/play() to work. */}
+      <audio ref={speechAudioElRef} hidden />
     </>
   );
 }

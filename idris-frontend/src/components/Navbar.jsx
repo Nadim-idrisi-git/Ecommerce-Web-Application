@@ -28,7 +28,7 @@ const Navbar = () => {
   };
 
   return (
-    <div className="flex items-center justify-between gap-4 px-4 sm:px-6 py-5">
+    <div className="sticky top-0 z-50 bg-white flex items-center justify-between gap-4 px-4 sm:px-6 py-5">
       <Link to="/" className="flex-shrink-0"><img src={assets.logo} className="w-28 sm:w-36 lg:w-40" alt="logo" /></Link>
       <ul className="hidden lg:flex gap-5 xl:gap-7 text-sm text-gray-700">
         <NavLink to="/" className="flex flex-col items-center gap-1">
@@ -88,9 +88,11 @@ const Navbar = () => {
            <img onClick={() => setVisible(true)} src={assets.menu_icon}  className='w-5 cursor-pointer lg:hidden' alt=""/>
       </div>
 
-      {/* Sidebar menu for mobile */}
-      
-       <div className={`absolute top-0 right-0 bottom-0 z-50 overflow-hidden bg-white transition-all ${visible ? 'w-full' : 'w-0'}`}>
+      {/* Sidebar menu for mobile - fixed rather than absolute so it still
+          covers the full viewport now that the Navbar root is sticky
+          (a positioned ancestor), instead of shrinking to just its height. */}
+
+       <div className={`fixed top-0 right-0 bottom-0 z-50 overflow-hidden bg-white transition-all ${visible ? 'w-full' : 'w-0'}`}>
           <div className="flex flex-col text-gray-600">
             <div onClick={() => setVisible(false)} className="flex items-center gap-4 p-3 cursor-pointer">
               <img className="h-4 rotate-180" src={assets.dropdown_icon} alt="" />
