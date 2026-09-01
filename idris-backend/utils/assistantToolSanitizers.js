@@ -109,13 +109,17 @@ export const assistantToolSanitizers = {
     if (!productId && !query) return null;
 
     const quantityNumber = Number(args.quantity);
-    if (!Number.isFinite(quantityNumber) || quantityNumber < 0) return null;
+    const deltaNumber = Number(args.delta);
+    const hasQuantity = Number.isFinite(quantityNumber) && quantityNumber >= 0;
+    const hasDelta = Number.isFinite(deltaNumber) && deltaNumber !== 0;
+    if (!hasQuantity && !hasDelta) return null;
 
     return {
       productId,
       query,
       size: asString(args.size).slice(0, 20),
-      quantity: Math.min(Math.round(quantityNumber), 10),
+      ...(hasQuantity ? { quantity: Math.min(Math.round(quantityNumber), 10) } : {}),
+      ...(hasDelta ? { delta: Math.max(-10, Math.min(Math.round(deltaNumber), 10)) } : {}),
     };
   },
 

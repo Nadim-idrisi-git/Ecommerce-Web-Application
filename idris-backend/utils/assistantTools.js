@@ -161,7 +161,7 @@ export const assistantTools = [
   {
     name: "update_cart_quantity",
     description:
-      "Change the quantity of an item already in the customer's cart to an exact amount they stated. Only call this when the customer gives an explicit new quantity.",
+      "Change the quantity of an item already in the customer's cart. Understand natural English, Hindi, and Hinglish such as 'increase this by one', 'cart me quantity plus 5 kar do', or 'is product ki quantity badha do'. Use quantity for an explicit final amount (make it 3), or delta for an explicit increase/decrease (increase by 2). Only call this when the customer clearly asks for the cart change.",
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -173,8 +173,8 @@ export const assistantTools = [
         },
         size: { type: Type.STRING, description: "Which size line item in the cart to update." },
         quantity: { type: Type.NUMBER, description: "The exact target quantity the customer stated." },
+        delta: { type: Type.NUMBER, description: "The explicit amount to add or subtract from the current quantity." },
       },
-      required: ["quantity"],
     },
   },
   {
