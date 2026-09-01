@@ -1,6 +1,34 @@
+import dns from 'node:dns'
 import express from 'express'
 import cors from 'cors';
 import 'dotenv/config'
+
+// Verified by directly instrumenting dns.lookup() during a live fetch() to
+// generativelanguage.googleapis.com (the @google/genai SDK's global fetch
+// calls dns.lookup() to resolve it, confirmed the same way) that
+// setDefaultResultOrder('ipv4first') alone only changes which address
+// dns.lookup() *prefers* when both A and AAAA records exist - it doesn't
+// stop an IPv6 address from still being resolvable/attempted. Google's API
+// genuinely publishes AAAA records (2001:4860:...), and this network's route
+// to at least one of those addresses times out even though every IPv4
+// address tested connects immediately. Hard-forcing family 4 on every
+// dns.lookup() call (not just preferring it) removes the IPv6 path from
+// resolution entirely, so nothing - undici's fetch here, or any other
+// outbound call in this backend - can ever be handed one of those addresses
+// to connect to in the first place.
+const originalDnsLookup = dns.lookup
+dns.lookup = (hostname, optionsOrCallback, maybeCallback) => {
+  if (typeof optionsOrCallback === 'function') {
+    return originalDnsLookup(hostname, { family: 4 }, optionsOrCallback)
+  }
+
+  const options =
+    typeof optionsOrCallback === 'number'
+      ? { family: 4 }
+      : { ...optionsOrCallback, family: 4 }
+
+  return originalDnsLookup(hostname, options, maybeCallback)
+}
 import connectDB from './config/mongodb.js'
 import connectCloudinary from './config/cloudinary.js'
 import userRouter from './routes/userRoute.js'

@@ -6,6 +6,7 @@ import {
   sanitizeHistory,
   sanitizeMessage,
 } from "../utils/aiChatContext.js";
+import { callGeminiWithRetry } from "../utils/callGeminiWithRetry.js";
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
@@ -49,7 +50,12 @@ Customer Message:
 ${message}
       `;
 
-    const response = await ai.models.generateContent({
+    // Every other Gemini call site (intentController.js, agentOrchestrator.js,
+    // generateRagAnswer.js, generateComparisonAnswer.js) wraps its call with
+    // this bounded timeout+retry - this one was missed, leaving /api/chat
+    // with no protection against a transient network hiccup or a hang, which
+    // just 500s the request outright instead of getting one bounded retry.
+    const response = await callGeminiWithRetry(() => ai.models.generateContent({
       model: "gemini-3.6-flash",
       contents: [...historyContents, { role: "user", parts: [{ text: promptText }] }],
       // A short conversational/support reply doesn't need multi-step
@@ -59,7 +65,7 @@ ${message}
       // that needs to actually reason about the catalog (e.g. comparing
       // two products).
       config: { thinkingConfig: { thinkingLevel: "low" } },
-    });
+    }));
 
     res.status(200).json({
       success: true,

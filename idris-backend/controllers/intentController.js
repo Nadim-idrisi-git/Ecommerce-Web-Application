@@ -11,6 +11,9 @@ import {
 } from "../utils/aiChatContext.js";
 import { CLARIFY_PREFIX, extractFunctionCall, extractReplyText } from "../utils/geminiResponseParsing.js";
 import { runAgentOrchestrator, isObservableTool } from "../utils/agentOrchestrator.js";
+import { assistantRag } from "../utils/rag/assistantRag.js";
+import { buildShoppingQueryPlan } from "../utils/rag/shoppingQueryPlan.js";
+import { isCatalogQuestion } from "../utils/rag/catalogQuestionIntent.js";
 import { callGeminiWithRetry } from "../utils/callGeminiWithRetry.js";
 import { logOrchestrationEvent } from "../utils/orchestrationLogger.js";
 
@@ -106,6 +109,44 @@ export const detectAIIntent = async (req, res) => {
       recentOrders: [],
       uiOpen: {},
     };
+
+    // Product-fact questions do not need the general intent model first.
+    // Retrieve and answer them directly so the response is both grounded and
+    // faster, while explicit action requests continue through the tool router
+    // below. Pass the raw client history here because buildShoppingQueryPlan()
+    // owns the history sanitizer and needs the original user turns to carry
+    // constraints such as a previously selected color or budget forward.
+    if (isCatalogQuestion(message, products)) {
+      try {
+        const plan = buildShoppingQueryPlan({
+          originalQuery: message,
+          toolArguments: { query: message },
+          history,
+        });
+        const rag = await assistantRag({
+          query: plan.retrievalQuery,
+          plan,
+          originalQuery: message,
+        });
+
+        return res.json({
+          success: true,
+          tool: null,
+          reply: rag.answer,
+          replyType: "answer",
+          rag,
+        });
+      } catch (error) {
+        console.error("Grounded catalog question failed:", error.message);
+        return res.json({
+          success: true,
+          tool: null,
+          reply:
+            "I could not verify that product detail right now. Please try the question again.",
+          replyType: "answer",
+        });
+      }
+    }
 
     const promptText = `
 You are the action router AND the conversational assistant for the IDRIS
