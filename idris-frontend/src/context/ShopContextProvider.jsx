@@ -172,29 +172,41 @@ const ShopContextProvider = (props) => {
 
 };
 
-  // Sets a cart line to an exact quantity in a single save (unlike
-  // addToCart/removeFromCart, which move by one and are meant for the +/-
-  // buttons). Used by the assistant for "add N", "make it 3", and removal
-  // (quantity 0), so a single voice instruction is one network call, not N.
-  const setCartItemQuantity = useCallback((itemId, size, quantity) => {
-    const targetQuantity = Math.max(0, Math.min(10, Math.round(Number(quantity) || 0)));
+  // Backend-verified cart mutations for the AI assistant. Unlike
+  // addToCart/removeFromCart above (which optimistically compute the next
+  // cartData client-side and blind-overwrite it), these call dedicated
+  // endpoints that re-check the user's actual stored cart and the real
+  // product/size before mutating, then hand back the server's own
+  // resulting cartData - so the assistant only ever reports a change it
+  // knows the backend actually made, never one it merely computed locally.
+  const assistantRequest = useCallback(async (path, body) => {
+    if (!token) return { success: false, message: "Please log in first" };
+    if (!backendUrl) return { success: false, message: apiConfigError || "Backend URL is not configured" };
 
-    setCartItems((prev) => {
-      const copy = structuredClone(prev);
+    try {
+      const response = await axios.post(backendUrl + path, body, authHeaders());
+      if (response.data.success && response.data.cartData) setCartItems(response.data.cartData);
+      return response.data;
+    } catch (error) {
+      return { success: false, message: error.response?.data?.message || error.message };
+    }
+  }, [token, backendUrl, apiConfigError, authHeaders]);
 
-      if (targetQuantity <= 0) {
-        if (copy[itemId]) {
-          delete copy[itemId][size];
-          if (Object.keys(copy[itemId]).length === 0) delete copy[itemId];
-        }
-      } else {
-        copy[itemId] = { ...(copy[itemId] || {}), [size]: targetQuantity };
-      }
+  const assistantAddToCart = useCallback(
+    (productId, size, quantity = 1) => assistantRequest("/api/user/cart/add", { productId, size, quantity }),
+    [assistantRequest]
+  );
 
-      saveCart(copy);
-      return copy;
-    });
-  }, [saveCart]);
+  const assistantUpdateCartQuantity = useCallback(
+    (productId, size, { delta, quantity } = {}) =>
+      assistantRequest("/api/user/cart/update", { productId, size, delta, quantity }),
+    [assistantRequest]
+  );
+
+  const assistantRemoveFromCart = useCallback(
+    (productId, size) => assistantRequest("/api/user/cart/remove", { productId, size }),
+    [assistantRequest]
+  );
 
 const getSubtotal = () => {
   let total = 0;
@@ -283,14 +295,17 @@ const getSubtotal = () => {
     navigate("/login");
   };
 
-  const placeOrder = useCallback(async ({ items, amount, address, paymentMethod, source }) => {
+  const placeOrder = useCallback(async ({ address, paymentMethod, source }) => {
     if (!backendUrl) {
       throw new Error(apiConfigError || "Backend URL is not configured");
     }
 
+    // Only the delivery address and payment method travel to the backend -
+    // items, prices and the total are derived server-side from the user's
+    // saved cart and current product prices, never trusted from the client.
     const response = await axios.post(
       backendUrl + "/api/order/place",
-      { items, amount, address, paymentMethod, source },
+      { address, paymentMethod, source },
       authHeaders()
     );
 
@@ -401,7 +416,9 @@ const getSubtotal = () => {
     buyNow,
     getCartCount,
     removeFromCart,
-    setCartItemQuantity,
+    assistantAddToCart,
+    assistantUpdateCartQuantity,
+    assistantRemoveFromCart,
     getSubtotal,
     paymentMethod,
 setPaymentMethod,

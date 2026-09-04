@@ -1,8 +1,10 @@
 import orderModel from "../models/orderModel.js";
 import userModel from "../models/userModel.js";
+import productModel from "../models/productModel.js";
 import Stripe from "stripe";
 import Razorpay from "razorpay";
 import crypto from "crypto";
+import { sanitizeAddress, validateAddress } from "./userController.js";
 
 // Minimal audit trail for security-sensitive actions the AI assistant
 // takes on the customer's behalf - never logs address/payment/contact
@@ -138,19 +140,97 @@ const cancelOrderWithRefund = async (order, { cancelledBy, reason }) => {
     await order.save();
 };
 
+const DELIVERY_FEE = 10;
+const validPaymentMethods = ["COD", "Stripe", "Razorpay"];
+
+// The client is never trusted with price, quantity, or total - all of it is
+// re-derived here from the user's server-side cart (synced via /api/user/cart,
+// which only ever stores productId/size/quantity) and the current product
+// prices, so an edited request body can't change what gets charged.
+const buildOrderItemsFromCart = async (cartData) => {
+    const productIds = Object.keys(cartData || {});
+    if (productIds.length === 0) return [];
+
+    const products = await productModel.find({ _id: { $in: productIds } });
+    const productMap = new Map(products.map((product) => [product._id.toString(), product]));
+
+    const items = [];
+
+    for (const productId of productIds) {
+        const product = productMap.get(productId);
+        if (!product) continue;
+
+        const sizes = cartData[productId] || {};
+
+        for (const size of Object.keys(sizes)) {
+            const quantity = Number(sizes[size]);
+
+            if (!Number.isInteger(quantity) || quantity <= 0 || quantity > 1000) continue;
+            if (!product.sizes.includes(size)) continue;
+
+            items.push({
+                productId: product._id.toString(),
+                name: product.name,
+                price: product.price,
+                image: product.images?.[0] || "",
+                size,
+                quantity,
+            });
+        }
+    }
+
+    return items;
+};
+
+// A saved addressId is looked up only within the logged-in user's own
+// addresses subdocuments, so it can never resolve to another account's
+// address. An ad-hoc (unsaved) address is still validated for shape but
+// isn't tied to any account - same as entering it at checkout today.
+const resolveOrderAddress = (user, requestedAddress) => {
+    const addressId = requestedAddress?.addressId;
+
+    if (addressId) {
+        const savedAddress = user.addresses.id(addressId);
+        return savedAddress ? savedAddress.toObject() : null;
+    }
+
+    const sanitized = sanitizeAddress(requestedAddress);
+    return validateAddress(sanitized) ? null : sanitized;
+};
+
 const placeOrder = async (req, res) => {
     try {
-        const { items, amount, address, paymentMethod } = req.body;
+        const { address, paymentMethod } = req.body;
 
-        if (!items || items.length === 0) {
+        if (!validPaymentMethods.includes(paymentMethod)) {
+            return res.json({ success: false, message: "Invalid payment method" });
+        }
+
+        const user = await userModel.findById(req.userId);
+        if (!user) {
+            return res.status(404).json({ success: false, message: "User not found" });
+        }
+
+        const items = await buildOrderItemsFromCart(user.cartData);
+
+        if (items.length === 0) {
             return res.json({ success: false, message: "Cart is empty" });
         }
+
+        const resolvedAddress = resolveOrderAddress(user, address);
+
+        if (!resolvedAddress) {
+            return res.status(400).json({ success: false, message: "Please provide a valid delivery address" });
+        }
+
+        const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+        const amount = subtotal + DELIVERY_FEE;
 
         const orderData = {
             userId: req.userId,
             items,
             amount,
-            address,
+            address: resolvedAddress,
             paymentMethod,
             payment: false,
             paymentStatus: "pending",
@@ -185,7 +265,7 @@ const placeOrder = async (req, res) => {
                     price_data: {
                         currency: "usd",
                         product_data: { name: "Shipping Fee" },
-                        unit_amount: Math.round((Number(amount) - items.reduce((sum, item) => sum + Number(item.price) * Number(item.quantity), 0)) * 100),
+                        unit_amount: Math.round(DELIVERY_FEE * 100),
                     },
                     quantity: 1,
                 }]),

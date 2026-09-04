@@ -2,6 +2,7 @@ import validator from "validator";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken"
 import userModel from "../models/userModel.js";
+import productModel from "../models/productModel.js";
 import crypto from "crypto";
 
 const createToken = (id) => {
@@ -162,6 +163,154 @@ const updateCart = async (req, res) => {
         const { cartData } = req.body;
         await userModel.findByIdAndUpdate(req.userId, { cartData: cartData || {} });
         res.json({ success: true, message: "Cart updated", cartData: cartData || {} });
+    } catch (error) {
+        console.log(error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+const CART_QUANTITY_CAP = 10;
+
+const clampCartQuantity = (value) => Math.max(0, Math.min(CART_QUANTITY_CAP, Math.round(Number(value) || 0)));
+
+// Deterministic, backend-verified cart mutations for the AI assistant.
+// Unlike updateCart() above (a blind full-cartData overwrite trusted from
+// whatever the client last computed), these re-read the user's real stored
+// cart and the real product/size before mutating, and report back whether
+// the item genuinely existed - the assistant must never decide a cart item
+// exists based on generated text or stale client state; this is the
+// authoritative check.
+const addCartItem = async (req, res) => {
+    try {
+        const { productId, size, quantity } = req.body;
+
+        if (!productId || !size) {
+            return res.status(400).json({ success: false, message: "productId and size are required" });
+        }
+
+        const product = await productModel.findById(productId);
+        if (!product) {
+            return res.json({ success: false, message: "That product no longer exists" });
+        }
+        if (product.sizes?.length && !product.sizes.includes(size)) {
+            return res.json({ success: false, message: `Size ${size} is not available for ${product.name}` });
+        }
+
+        const user = await userModel.findById(req.userId);
+        const cartData = user.cartData || {};
+        const current = Number(cartData[productId]?.[size]) || 0;
+        const nextQuantity = clampCartQuantity(current + (Number(quantity) || 1));
+
+        cartData[productId] = { ...(cartData[productId] || {}), [size]: nextQuantity };
+        user.cartData = cartData;
+        user.markModified("cartData");
+        await user.save();
+
+        res.json({
+            success: true,
+            message: "Item added to cart",
+            cartData,
+            item: { productId, size, quantity: nextQuantity, name: product.name },
+        });
+    } catch (error) {
+        console.log(error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+const updateCartItemQuantity = async (req, res) => {
+    try {
+        const { productId, size, delta, quantity } = req.body;
+
+        if (!productId || !size) {
+            return res.status(400).json({ success: false, message: "productId and size are required" });
+        }
+        if (delta === undefined && quantity === undefined) {
+            return res.status(400).json({ success: false, message: "Provide either quantity or delta" });
+        }
+
+        const user = await userModel.findById(req.userId);
+        const cartData = user.cartData || {};
+        const current = cartData[productId]?.[size];
+
+        if (current === undefined) {
+            return res.json({ success: false, message: "That item is not in your cart" });
+        }
+
+        const nextQuantity = delta !== undefined
+            ? clampCartQuantity(Number(current) + Number(delta))
+            : clampCartQuantity(quantity);
+
+        const removed = nextQuantity <= 0;
+
+        if (removed) {
+            delete cartData[productId][size];
+            if (Object.keys(cartData[productId]).length === 0) delete cartData[productId];
+        } else {
+            cartData[productId][size] = nextQuantity;
+        }
+
+        user.cartData = cartData;
+        user.markModified("cartData");
+        await user.save();
+
+        const product = await productModel.findById(productId).select("name");
+
+        res.json({
+            success: true,
+            message: removed ? "Item removed from cart" : "Cart updated",
+            cartData,
+            item: { productId, size, quantity: removed ? 0 : nextQuantity, name: product?.name || "" },
+            removed,
+        });
+    } catch (error) {
+        console.log(error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+const removeCartItem = async (req, res) => {
+    try {
+        const { productId, size } = req.body;
+
+        if (!productId) {
+            return res.status(400).json({ success: false, message: "productId is required" });
+        }
+
+        const user = await userModel.findById(req.userId);
+        const cartData = user.cartData || {};
+
+        if (!cartData[productId]) {
+            return res.json({ success: false, message: "That item is not in your cart" });
+        }
+
+        let removedSizes;
+
+        if (size) {
+            if (!(size in cartData[productId])) {
+                return res.json({ success: false, message: `That item is not in your cart in size ${size}` });
+            }
+            delete cartData[productId][size];
+            removedSizes = [size];
+            if (Object.keys(cartData[productId]).length === 0) delete cartData[productId];
+        } else {
+            removedSizes = Object.keys(cartData[productId]);
+            delete cartData[productId];
+        }
+
+        user.cartData = cartData;
+        user.markModified("cartData");
+        await user.save();
+
+        const product = await productModel.findById(productId).select("name");
+
+        res.json({
+            success: true,
+            message: "Item removed from cart",
+            cartData,
+            removedSizes,
+            item: { productId, name: product?.name || "" },
+        });
     } catch (error) {
         console.log(error);
         res.status(500).json({ success: false, message: error.message });
@@ -413,4 +562,4 @@ const adminLogin = async (req, res) => {
     }
 };
 
-export { loginUser, registerUser, getProfile, getCart, updateCart, getAddresses, addAddress, updateAddress, deleteAddress, setDefaultAddress, forgotPassword, resetPassword, adminLogin };
+export { loginUser, registerUser, getProfile, getCart, updateCart, addCartItem, updateCartItemQuantity, removeCartItem, getAddresses, addAddress, updateAddress, deleteAddress, setDefaultAddress, forgotPassword, resetPassword, adminLogin, sanitizeAddress, validateAddress };

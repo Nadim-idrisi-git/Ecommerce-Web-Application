@@ -8,6 +8,39 @@ const ai = new GoogleGenAI({
 // Keeps synthesis fast/cheap and bounds cost - assistant replies are meant
 // to be short spoken sentences, not long-form text.
 const MAX_SPEECH_TEXT_LENGTH = 600;
+
+// Grounded RAG answers (search_products/recommend_products describing two
+// or three matching products) routinely run past MAX_SPEECH_TEXT_LENGTH
+// even though ragGenerationPrompt.js asks for a concise reply - "concise"
+// still varies with how many products are being described, and nothing
+// upstream enforces a hard character cap on what the model returns. This
+// endpoint used to hard-reject any such answer with a 400, which silently
+// killed voice output for exactly the multi-product replies customers hear
+// most often, even though the tool call, product results, and displayed
+// text had already succeeded (see agentOrchestrator's logs). Trimming to a
+// clean sentence boundary - or, failing that, a clean word boundary - keeps
+// the same synthesis cost bound while still speaking something coherent
+// instead of refusing outright.
+const truncateForSpeech = (value) => {
+  if (value.length <= MAX_SPEECH_TEXT_LENGTH) return value;
+
+  const clipped = value.slice(0, MAX_SPEECH_TEXT_LENGTH);
+  // "। " covers Hindi/Hinglish replies (the assistant's default language),
+  // not just English sentence punctuation.
+  const lastSentenceEnd = Math.max(
+    clipped.lastIndexOf(". "),
+    clipped.lastIndexOf("! "),
+    clipped.lastIndexOf("? "),
+    clipped.lastIndexOf("। "),
+  );
+
+  if (lastSentenceEnd > MAX_SPEECH_TEXT_LENGTH * 0.4) {
+    return clipped.slice(0, lastSentenceEnd + 1).trim();
+  }
+
+  const lastSpace = clipped.lastIndexOf(" ");
+  return (lastSpace > MAX_SPEECH_TEXT_LENGTH * 0.4 ? clipped.slice(0, lastSpace) : clipped).trim();
+};
 // One fixed, natural-sounding female Gemini voice for every browser/device.
 // Keeping this server-side prevents Safari/Chrome/Brave from choosing their
 // own local voice or changing Zara's voice between turns.
@@ -217,21 +250,16 @@ const attemptSpeechStream = (text, res, isClientClosed, finishHolder) => new Pro
 });
 
 export const streamSpeech = async (req, res) => {
-  const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
+  const rawText = typeof req.body?.text === "string" ? req.body.text.trim() : "";
 
-  if (!text) {
+  if (!rawText) {
     return res.status(400).json({
       success: false,
       message: "Text is required",
     });
   }
 
-  if (text.length > MAX_SPEECH_TEXT_LENGTH) {
-    return res.status(400).json({
-      success: false,
-      message: "Text is too long to speak",
-    });
-  }
+  const text = truncateForSpeech(rawText);
 
   let clientClosed = false;
   // .current points at whichever attempt is currently in flight's own

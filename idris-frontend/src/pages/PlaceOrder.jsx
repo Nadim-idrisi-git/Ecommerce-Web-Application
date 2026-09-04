@@ -165,27 +165,11 @@ const PlaceOrder = () => {
       }
     }
 
-    const orderItems = [];
+    const hasItems = Object.values(cartItems).some((sizes) =>
+      Object.values(sizes).some((quantity) => quantity > 0)
+    );
 
-    for (const itemId in cartItems) {
-      for (const size in cartItems[itemId]) {
-        if (cartItems[itemId][size] > 0) {
-          const productData = products.find((product) => product._id === itemId);
-          if (productData) {
-            orderItems.push({
-              productId: itemId,
-              name: productData.name,
-              price: productData.price,
-              image: productData.image?.[0],
-              size,
-              quantity: cartItems[itemId][size],
-            });
-          }
-        }
-      }
-    }
-
-    if (orderItems.length === 0) {
+    if (!hasItems) {
       alert("Your cart is empty");
       return;
     }
@@ -214,8 +198,6 @@ const PlaceOrder = () => {
       }
 
       const response = await placeOrder({
-        items: orderItems,
-        amount: getSubtotal() + delivery_fee,
         address: checkoutAddress,
         paymentMethod: method,
       });
