@@ -1,79 +1,191 @@
-# IDRIS — Modern E-Commerce Website
-visit: https://idris-frontend-ten.vercel.app/
+# IDRIS — AI-Powered E-Commerce Platform
 
-**IDRIS** is a modern, full-stack e-commerce website designed for users who want to discover and shop the latest **stylish, trendy, and fashionable clothing** online. The platform focuses on providing a clean, fast, and responsive shopping experience across **desktop, tablet, and mobile devices**.
+**IDRIS** is a modern, full-stack e-commerce platform built with the **MERN Stack**, enhanced with an AI-powered conversational shopping assistant.
 
-The project is built using the **MERN Stack** and combines a modern React frontend with a Node.js and Express.js backend, MongoDB for data management, Cloudinary for product images, and AI integration for an interactive shopping experience.
+It allows users to discover trendy and fashionable clothing, search products using natural language, receive AI-powered recommendations, manage their cart and orders, and interact with the website using **voice-based AI assistance**.
+
+The platform is fully responsive and optimized for **desktop, tablet, and mobile devices**.
+
+## Live Demo
+
+**Website:** https://idris-frontend-ten.vercel.app/
 
 ## Features
 
-- Modern and responsive e-commerce interface
-- Browse and explore trendy clothing collections
-- Product search functionality
+### E-Commerce
+
+- Modern responsive e-commerce interface
+- Browse trendy clothing collections
+- Product search and filtering
 - Detailed product pages with multiple images
 - Product image zoom and preview
-- Add products to the shopping cart
-- Update product quantity and remove items
-- Persistent cart data
+- Add, update, and remove cart items
+- Persistent shopping cart
 - User registration and login
-- Authentication and authorization
-- Secure order placement and order management
+- JWT authentication and authorization
+- Secure order placement and management
 - Admin product management
-- Upload and manage product images using Cloudinary
+- Cloudinary-based product image management
 - RESTful APIs for frontend-backend communication
-- AI-powered chatbot for customer assistance
-- Responsive layout for desktop, tablet, and mobile
+
+### AI Shopping Assistant
+
+- AI-powered conversational shopping assistant
+- Natural-language product search
+- AI-powered product recommendations
+- Context-aware shopping assistance
+- RAG-based product information retrieval
+- Grounded responses using product data
+- AI agent orchestration
+- Controlled tool-based AI interactions
+- Voice input using speech recognition
+- Neural text-to-speech responses
+- Hands-free shopping experience
+- Graceful text fallback when voice output is unavailable
+
+## AI Assistant Flow
+
+```text
+User
+  ↓
+Voice / Text Input
+  ↓
+React AI Assistant
+  ↓
+Backend API
+  ↓
+AI Agent Orchestrator
+  ↓
+Product Search / Recommendation / RAG
+  ↓
+Grounded Product Data
+  ↓
+AI Response
+  ↓
+Text + Neural Voice
+```
+
+## Application Architecture
+
+```text
+User
+ ↓
+React + Vite Frontend
+ ↓
+Node.js + Express.js Backend
+ ↓
+ ├── MongoDB
+ ├── Cloudinary
+ └── AI / LLM
+       ↓
+   RAG + AI Tools
+       ↓
+ Product Search & Recommendations
+```
 
 ## Tech Stack
 
 ### Frontend
+
 - React.js
 - Vite
 - JavaScript
 - Tailwind CSS
 - React Router
 - Context API
+- Web Speech API
 
 ### Backend
+
 - Node.js
 - Express.js
 - REST APIs
 - JWT Authentication
 - Multer
+- AI Agent Orchestration
+- RAG Pipeline
 
 ### Database & Services
+
 - MongoDB
 - Mongoose
 - Cloudinary
 - AI / LLM API
+- Neural Text-to-Speech API
 
 ### Development & Deployment
+
 - Git & GitHub
 - Postman
 - Vercel
+- Render
 
-## Application Architecture
+## AI Capabilities
+
+The IDRIS AI Assistant uses a controlled, tool-based architecture to provide reliable shopping assistance.
+
+Users can ask queries such as:
 
 ```text
-                 User
-                  ↓
-          React.js Frontend
-                  ↓
-        REST API / HTTP Requests
-                  ↓
-        Node.js + Express.js
-          ↙       ↓        ↘
-     MongoDB   Cloudinary   AI / LLM
+"Suggest something for winter."
+
+"Show me black oversized t-shirts."
+
+"Find something trendy under ₹1500."
+
+"I need a casual outfit for college."
+
+"Recommend something for a party."
 ```
+
+The assistant can understand the user's query, retrieve relevant product information, execute approved tools, and generate a grounded response.
 
 ## Project Highlights
 
-IDRIS demonstrates the development of a complete **MERN stack e-commerce application**, covering frontend development, backend API development, database management, authentication, cloud-based image storage, shopping cart functionality, order management, and AI-powered customer interaction.
+IDRIS demonstrates practical experience in building a complete **MERN Stack e-commerce application** with modern AI capabilities.
 
-The project is designed with a scalable structure so that additional features such as **online payments, product reviews, wishlist, coupons, order tracking, personalized recommendations, and advanced AI product search** can be added in the future.
+Key areas include:
+
+- Full-stack MERN development
+- REST API development
+- JWT authentication
+- MongoDB database management
+- Cloudinary image management
+- Shopping cart and order management
+- Admin product management
+- AI/LLM integration
+- RAG-based product retrieval
+- AI agent orchestration
+- Tool calling
+- Voice input and output
+- Responsive UI development
+- Production deployment
+
+## Future Improvements
+
+- Online payments
+- Product reviews and ratings
+- Wishlist
+- Coupons and discounts
+- Advanced order tracking
+- Personalized recommendations
+- Semantic product search
+- Multilingual voice assistant
+- AI-powered visual product search
+- Advanced conversational memory
 
 ## Project Status
 
 **Active Development**
 
-IDRIS is continuously being improved with new features, UI enhancements, performance optimizations, and AI-powered capabilities.
+IDRIS is continuously being improved with new AI capabilities, voice interactions, UI enhancements, performance optimizations, RAG improvements, agent reliability, and production hardening.
+
+## Author
+
+**Nadim Idrisi**
+
+B.Tech Graduate | MERN Stack Developer | Java & DSA | AI Integration
+
+## License
+
+This project is developed for educational, portfolio, and demonstration purposes.
