@@ -277,7 +277,9 @@ export default function AIAssistant() {
   const {
     products,
     cartItems,
-    setCartItemQuantity,
+    assistantAddToCart,
+    assistantUpdateCartQuantity,
+    assistantRemoveFromCart,
     voiceSearchFilters,
     setSearch,
     setShowSearch,
@@ -858,7 +860,7 @@ export default function AIAssistant() {
   };
 
   const pauseCaptureForSpeech = () => {
-    if (!listeningSessionRef.current || suppressBargeInRef.current) return;
+    if (!listeningSessionRef.current) return;
 
     capturePausedForSpeechRef.current = true;
 
@@ -1635,22 +1637,25 @@ export default function AIAssistant() {
     return null;
   };
 
-  const findProductByQuery = (query) => {
+  // `candidates` defaults to the full catalog (open_product/add_to_cart);
+  // resolveCartItemFromArgs passes a cart-only list so name matching for a
+  // cart mutation can never land on a product the customer never added.
+  const findProductByQuery = (query, candidates = products) => {
     const normalized = (query || "").toLowerCase().trim();
     if (!normalized) return null;
 
-    const exact = products.find(
+    const exact = candidates.find(
       (product) => (product.name || "").toLowerCase() === normalized,
     );
     if (exact) return exact;
 
-    const partial = products.find((product) =>
+    const partial = candidates.find((product) =>
       (product.name || "").toLowerCase().includes(normalized),
     );
     if (partial) return partial;
 
     const words = normalized.split(/\s+/).filter(Boolean);
-    const scored = products
+    const scored = candidates
       .map((product) => {
         const name = (product.name || "").toLowerCase();
         const score = words.filter((word) => name.includes(word)).length;
@@ -1925,6 +1930,45 @@ export default function AIAssistant() {
     );
   };
 
+  const cartHasItems = () =>
+    Object.values(cartItems || {}).some((sizes) =>
+      Object.values(sizes || {}).some((quantity) => quantity > 0),
+    );
+
+  // Deterministic cart-item resolution for update_cart_quantity/
+  // remove_from_cart. Unlike resolveProductFromArgs above (used for
+  // open_product/add_to_cart, which searches the whole catalog), this only
+  // ever matches products the customer actually has in their cart right
+  // now. Gemini's job is to understand the language ("increase it by 5");
+  // deciding which real cart line that refers to is deterministic app
+  // code, never a catalog-wide guess - and the backend still re-verifies
+  // the chosen productId/size actually exists in the stored cart before
+  // mutating anything.
+  const resolveCartItemFromArgs = (args, rawText) => {
+    const cartProductIds = Object.keys(cartItems || {}).filter((productId) =>
+      Object.values(cartItems[productId] || {}).some((quantity) => quantity > 0),
+    );
+    const cartProducts = cartProductIds
+      .map((id) => products.find((product) => product._id === id))
+      .filter(Boolean);
+
+    if (cartProducts.length === 0) return null;
+
+    if (args.productId) {
+      // An explicit productId must actually be a cart line - never fall
+      // back to guessing a different one just because the cart is small.
+      return cartProducts.find((product) => product._id === args.productId) || null;
+    }
+
+    if (cartProducts.length === 1) return cartProducts[0];
+
+    const text = args.query || rawText || "";
+    return (
+      resolveSuperlativeProduct(text, cartProducts) ||
+      findProductByQuery(text, cartProducts)
+    );
+  };
+
   // Central place a recommendation/browse result gets spoken and pushed to
   // the collection page - shared by the audience/garment browse branch and
   // the (rare, now-audience-scoped) zero-signal path so both stay in sync
@@ -2148,8 +2192,10 @@ export default function AIAssistant() {
 
   // Finishes an add-to-cart once a size is known (either given directly,
   // auto-selected with permission, or answered in the size slot-filling
-  // follow-up). Always tells the customer which size was used.
-  const completeAddToCart = (productId, size, quantity, autoSelected) => {
+  // follow-up). The backend re-validates the product/size and computes the
+  // resulting quantity itself - this only speaks success once that's
+  // confirmed, never on the strength of the locally-cached product alone.
+  const completeAddToCart = async (productId, size, quantity, autoSelected) => {
     const product = products.find((item) => item._id === productId);
 
     if (!product) {
@@ -2162,13 +2208,15 @@ export default function AIAssistant() {
     const availableSizes = product.sizes || [];
     const resolvedSize =
       size || (availableSizes.length ? availableSizes[0] : "");
-    const currentQuantity = cartItems?.[productId]?.[resolvedSize] || 0;
 
-    setCartItemQuantity(
-      productId,
-      resolvedSize,
-      currentQuantity + (quantity || 1),
-    );
+    const result = await assistantAddToCart(productId, resolvedSize, quantity || 1);
+
+    if (!result.success) {
+      const spoken = result.message || `I could not add ${product.name} to your cart.`;
+      setAiReply(spoken);
+      speakText(spoken);
+      return spoken;
+    }
 
     const spoken = autoSelected
       ? `I added ${product.name} in size ${resolvedSize} to your cart, since any size works for you.`
@@ -2248,8 +2296,6 @@ export default function AIAssistant() {
       onConfirm: async () => {
         try {
           const response = await placeOrder({
-            items: orderItems,
-            amount,
             address: { ...defaultAddress, addressId: defaultAddress._id },
             paymentMethod: "COD",
             source: "assistant",
@@ -2257,7 +2303,7 @@ export default function AIAssistant() {
 
           if (response.success) {
             navigate("/orders");
-            const spoken = `Your order has been placed. Total ${currency}${amount}.`;
+            const spoken = `Your order has been placed. Total ${currency}${response.order?.amount ?? amount}.`;
             setCurrentAction("Order placed");
             setAiReply(spoken);
             speakText(spoken);
@@ -2369,13 +2415,18 @@ export default function AIAssistant() {
   // succeeded. Threaded through so those two cases can use it as the
   // authoritative response instead of running their own client-side
   // search/recommendation logic. Every other tool ignores it entirely.
-  const runTool = (tool, args = {}, rawText = "", rag = null) => {
-    const spoken = runToolInner(tool, args, rawText, rag);
+  const runTool = async (tool, args = {}, rawText = "", rag = null) => {
+    const spoken = await runToolInner(tool, args, rawText, rag);
     recordActivity(spoken);
     return spoken;
   };
 
-  const runToolInner = (tool, args = {}, rawText = "", rag = null) => {
+  // async: update_cart_quantity/remove_from_cart/add_to_cart now await a
+  // backend-verified result before speaking success (see
+  // resolveCartItemFromArgs and assistantUpdateCartQuantity/etc above) -
+  // every other case still just returns a plain string, which an async
+  // function resolves the same as before.
+  const runToolInner = async (tool, args = {}, rawText = "", rag = null) => {
     setSecurityNotice("");
 
     switch (tool) {
@@ -2682,11 +2733,14 @@ export default function AIAssistant() {
       }
 
       case "update_cart_quantity": {
-        const product = resolveProductFromArgs(args, rawText);
+        // Cart-scoped resolution only (see resolveCartItemFromArgs) - this
+        // can never land on a product that isn't actually a cart line.
+        const product = resolveCartItemFromArgs(args, rawText);
 
         if (!product) {
-          const spoken =
-            "I could not find that item in your cart, so main aapki quantity change nahi kar sakti.";
+          const spoken = cartHasItems()
+            ? "I could not tell which item in your cart you mean. Please say the product name."
+            : "Your cart is empty, so there is nothing to update.";
           setAiReply(spoken);
           speakText(spoken);
           return spoken;
@@ -2695,23 +2749,34 @@ export default function AIAssistant() {
         const cartForProduct = cartItems?.[product._id] || {};
         const size = args.size || Object.keys(cartForProduct)[0] || "";
 
-        if (!size || !(size in cartForProduct)) {
-          const spoken = `I could not find ${product.name}${args.size ? ` in size ${args.size}` : ""} in your cart.`;
+        if (!size) {
+          const spoken = `I could not find ${product.name} in your cart.`;
           setAiReply(spoken);
           speakText(spoken);
           return spoken;
         }
 
-        const currentQuantity = Number(cartForProduct[size]) || 0;
         const hasDelta = Number.isFinite(Number(args.delta));
-        const targetQuantity = hasDelta
-          ? Math.max(0, currentQuantity + Math.round(Number(args.delta)))
-          : Math.max(0, Math.round(Number(args.quantity) || 0));
-        setCartItemQuantity(product._id, size, targetQuantity);
+        // The backend is the source of truth: it re-checks that this
+        // productId/size is genuinely in the stored cart and computes the
+        // resulting quantity itself - a locally-guessed target is never
+        // trusted or spoken until this comes back.
+        const result = await assistantUpdateCartQuantity(product._id, size, {
+          delta: hasDelta ? Math.round(Number(args.delta)) : undefined,
+          quantity: hasDelta ? undefined : Math.max(0, Math.round(Number(args.quantity) || 0)),
+        });
 
+        if (!result.success) {
+          const spoken = result.message || `I could not find ${product.name} in your cart.`;
+          setAiReply(spoken);
+          speakText(spoken);
+          return spoken;
+        }
+
+        const finalQuantity = result.item?.quantity ?? 0;
         const spoken =
-          targetQuantity > 0
-            ? `Updated ${product.name} (size ${size}) to ${targetQuantity}.`
+          finalQuantity > 0
+            ? `Updated ${product.name} (size ${size}) to ${finalQuantity}.`
             : `Removed ${product.name} (size ${size}) from your cart.`;
 
         setCurrentAction(spoken);
@@ -2721,41 +2786,28 @@ export default function AIAssistant() {
       }
 
       case "remove_from_cart": {
-        const product = resolveProductFromArgs(args, rawText);
+        const product = resolveCartItemFromArgs(args, rawText);
 
         if (!product) {
-          const spoken = "I could not find that item in your cart.";
+          const spoken = cartHasItems()
+            ? "I could not tell which item in your cart you mean. Please say the product name."
+            : "Your cart is empty, so there is nothing to remove.";
           setAiReply(spoken);
           speakText(spoken);
           return spoken;
         }
 
-        const cartForProduct = cartItems?.[product._id] || {};
-        const sizesInCart = Object.keys(cartForProduct);
+        // Verified by the backend against the real stored cart - a single
+        // call removes one size, or every size for this product when none
+        // is given.
+        const result = await assistantRemoveFromCart(product._id, args.size || undefined);
 
-        if (sizesInCart.length === 0) {
-          const spoken = `${product.name} is not in your cart.`;
+        if (!result.success) {
+          const spoken = result.message || `${product.name} is not in your cart.`;
           setAiReply(spoken);
           speakText(spoken);
           return spoken;
         }
-
-        const targetSizes = args.size
-          ? sizesInCart.filter(
-              (size) => size.toLowerCase() === args.size.toLowerCase(),
-            )
-          : sizesInCart;
-
-        if (targetSizes.length === 0) {
-          const spoken = `${product.name} in size ${args.size} is not in your cart.`;
-          setAiReply(spoken);
-          speakText(spoken);
-          return spoken;
-        }
-
-        targetSizes.forEach((size) =>
-          setCartItemQuantity(product._id, size, 0),
-        );
 
         const spoken = `Removed ${product.name}${args.size ? ` (size ${args.size})` : ""} from your cart.`;
         setCurrentAction(spoken);
@@ -3081,19 +3133,24 @@ export default function AIAssistant() {
       recorder.onstart = () => {
         setStatus("listening");
         scheduleSilenceNudge();
-        if (!hasGreetedRef.current) {
-          hasGreetedRef.current = true;
-          suppressBargeInRef.current = true;
-          speakText(greetingLine, {
-            onSpeechEnd: () => {
-              suppressBargeInRef.current = false;
-            },
-          });
-          pushHistory("assistant", greetingLine);
-        }
       };
 
       recorder.ondataavailable = (event) => {
+        // The VAD loop already refuses to fire its "speech detected" stop
+        // callback while the opening greeting is playing (see
+        // assistantGreetingActive above), so recorder.stop() is never
+        // triggered by the greeting itself - but without this guard the
+        // recorder would still keep accumulating every chunk from the
+        // moment it started, including the greeting's own audio (which can
+        // leak straight back into the mic on phones/tablets with no
+        // reliable echo cancellation - see suppressBargeInRef's
+        // declaration). Once real speech is later detected and the recorder
+        // finally stops, that leaked greeting audio would still be sitting
+        // at the front of the blob sent off for transcription, so the
+        // greeting itself could end up transcribed and answered as if the
+        // customer had said it. Dropping chunks recorded while the greeting
+        // is playing keeps it out of that blob entirely.
+        if (suppressBargeInRef.current) return;
         if (event.data.size > 0) {
           audioChunksRef.current.push(event.data);
         }
@@ -3169,7 +3226,36 @@ export default function AIAssistant() {
       },
     );
 
-    startRecorderCycle();
+    // Do not create the first recorder until the opening greeting has ended.
+    // MediaRecorder can deliver delayed dataavailable events after the
+    // greeting suppression flag is cleared, which would otherwise let
+    // greeting audio enter the first user blob.
+    if (suppressBargeInRef.current) {
+      // A native-recognition session can fall back here while its greeting is
+      // still playing. Wait for that same greeting to finish before creating
+      // a recorder, so the first MediaRecorder blob starts clean.
+      const startWhenGreetingEnds = () => {
+        if (!listeningSessionRef.current) return;
+        if (suppressBargeInRef.current) {
+          setTimeout(startWhenGreetingEnds, 100);
+          return;
+        }
+        startRecorderCycle();
+      };
+      startWhenGreetingEnds();
+    } else if (!hasGreetedRef.current) {
+      hasGreetedRef.current = true;
+      suppressBargeInRef.current = true;
+      speakText(greetingLine, {
+        onSpeechEnd: () => {
+          suppressBargeInRef.current = false;
+          startRecorderCycle();
+        },
+      });
+      pushHistory("assistant", greetingLine);
+    } else {
+      startRecorderCycle();
+    }
   };
 
   const processVoiceText = async (text) => {
@@ -3223,7 +3309,7 @@ export default function AIAssistant() {
         }
 
         if (parsed?.size || parsed?.autoSelect) {
-          const spoken = completeAddToCart(
+          const spoken = await completeAddToCart(
             pending.productId,
             parsed.size || null,
             pending.quantity,
@@ -3331,7 +3417,7 @@ export default function AIAssistant() {
         return clarification;
       }
 
-      const directResponse = runTool(
+      const directResponse = await runTool(
         "update_cart_quantity",
         { query: normalizedText, ...directQuantityChange },
         normalizedText,
@@ -3387,7 +3473,7 @@ export default function AIAssistant() {
     let assistantResponse = "";
 
     if (toolCall?.tool) {
-      assistantResponse = runTool(
+      assistantResponse = await runTool(
         toolCall.tool,
         toolCall.arguments || {},
         normalizedText,
@@ -3778,21 +3864,24 @@ export default function AIAssistant() {
       setStatus("requesting-mic");
       listeningSessionRef.current = true;
 
+      if (!hasGreetedRef.current) {
+        hasGreetedRef.current = true;
+        suppressBargeInRef.current = true;
+        speakText(greetingLine, {
+          onSpeechEnd: () => {
+            suppressBargeInRef.current = false;
+            if (listeningSessionRef.current) startRecording();
+          },
+        });
+        pushHistory("assistant", greetingLine);
+        return;
+      }
+
       const recognition =
         voiceModeRef.current === "recognition" ? ensureRecognition() : null;
 
       if (recognition) {
         setStatus("listening");
-        if (!hasGreetedRef.current) {
-          hasGreetedRef.current = true;
-          suppressBargeInRef.current = true;
-          speakText(greetingLine, {
-            onSpeechEnd: () => {
-              suppressBargeInRef.current = false;
-            },
-          });
-          pushHistory("assistant", greetingLine);
-        }
         try {
           recognition.start();
         } catch {
