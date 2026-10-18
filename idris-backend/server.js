@@ -119,7 +119,15 @@ app.get('/', (req, res) => {
 })
 
 if (!process.env.VERCEL) {
-  app.listen(port, () => console.log(`Server started on PORT : ` + port))
+  // Express 5 invokes this callback on listen errors too (e.g. EADDRINUSE),
+  // so check it rather than always announcing success.
+  app.listen(port, (error) => {
+    if (error) {
+      console.error(`Failed to start server on PORT ${port}:`, error.message)
+      process.exit(1)
+    }
+    console.log(`Server started on PORT : ` + port)
+  })
 }
 
 export default app
