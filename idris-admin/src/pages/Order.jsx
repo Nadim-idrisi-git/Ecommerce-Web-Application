@@ -203,7 +203,7 @@ const Order = ({ token }) => {
                 </p>
               </div>
 
-              <p className='font-medium text-gray-800'>${order.amount}</p>
+              <p className='font-medium text-gray-800'>₹{order.amount}</p>
 
               <p className={`text-sm font-medium ${
                 order.status === 'Delivered' ? 'text-green-600' :
@@ -250,7 +250,7 @@ const Order = ({ token }) => {
                         <div className='flex-1'>
                           <p className='font-medium text-gray-800'>{item.name}</p>
                           <p className='text-sm text-gray-500 mt-1'>Size: {item.size} | Quantity: {item.quantity}</p>
-                          <p className='text-sm text-gray-800 mt-1'>${item.price} each</p>
+                          <p className='text-sm text-gray-800 mt-1'>₹{item.price} each</p>
                         </div>
                       </div>
                     ))}
@@ -301,7 +301,7 @@ const Order = ({ token }) => {
               <form onSubmit={updateOrder} className='border p-4 h-fit space-y-4'>
                 <div>
                   <p className='font-medium text-gray-800'>Manage Order</p>
-                  <p className='text-sm text-gray-500 mt-1'>Amount: ${selectedOrder.amount} | {selectedOrder.paymentMethod}</p>
+                  <p className='text-sm text-gray-500 mt-1'>Amount: ₹{selectedOrder.amount} | {selectedOrder.paymentMethod}</p>
                   <p className='text-sm text-gray-500 mt-1'>Payment: {getPaymentStatus(selectedOrder)}</p>
                   {selectedOrder.refundId && (
                     <p className='text-xs text-gray-500 mt-1 break-all'>Refund ID: {selectedOrder.refundId}</p>

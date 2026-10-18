@@ -256,14 +256,14 @@ const placeOrder = async (req, res) => {
                 mode: "payment",
                 line_items: items.map((item) => ({
                     price_data: {
-                        currency: "usd",
+                        currency: "inr",
                         product_data: { name: `${item.name} (${item.size})` },
                         unit_amount: Math.round(Number(item.price) * 100),
                     },
                     quantity: Number(item.quantity),
                 })).concat([{
                     price_data: {
-                        currency: "usd",
+                        currency: "inr",
                         product_data: { name: "Shipping Fee" },
                         unit_amount: Math.round(DELIVERY_FEE * 100),
                     },

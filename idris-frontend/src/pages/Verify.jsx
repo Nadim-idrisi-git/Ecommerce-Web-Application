@@ -164,7 +164,7 @@ const Verify = () => {
                   </div>
                   <div>
                     <p className="text-gray-500">Amount</p>
-                    <p className="font-medium text-gray-800">${order.amount}</p>
+                    <p className="font-medium text-gray-800">₹{order.amount}</p>
                   </div>
                   <div>
                     <p className="text-gray-500">Payment</p>
