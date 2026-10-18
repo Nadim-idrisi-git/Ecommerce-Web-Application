@@ -9,3 +9,5 @@ dist
 npm-debug.log*
 .claude
 .vscode
+clips.json
+scripts/data/
