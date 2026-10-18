@@ -29,8 +29,11 @@ const TRIGGER_ALTERNATION = NEGATION_TRIGGERS.map(escapeRegex).join("|");
 // color/print) are needed for the REVERSE direction specifically - "slim
 // FIT nahi" ("not slim fit") is the natural Hindi/Hinglish word order
 // (negation trailing the clause), and "fit" sits between the term and the
-// trigger there.
-const FILLER_ALTERNATION = "a|an|the|too|very|chahiye|chahiyen|fit|pattern|material|color|print";
+// trigger there. "wala/wali/wale" ("the ... one") is the other everyday
+// Hinglish filler in that slot - "cotton wali nahi" ("not the cotton one")
+// otherwise read as a request FOR cotton, the exact opposite.
+const FILLER_ALTERNATION =
+  "a|an|the|too|very|chahiye|chahiyen|fit|pattern|material|color|print|wala|wali|wale|waala|waali|waale";
 
 // FORWARD: negation trigger, then an optional filler, then the term -
 // "not black", "avoid the floral pattern", "nahi chahiye slim fit".
@@ -72,11 +75,12 @@ const findVocabMatch = (phrase) => {
 // natural Hindi/Hinglish word order routinely puts negation at the end of
 // the clause: "slim fit nahi" ("not slim fit"), "mujhe slim fit nahi
 // chahiye" ("I don't want slim fit") - the exact phrasing in this
-// module's own example #9. Built per-vocab-term (the term is the anchor
+// module's own example #9. Up to two fillers, for "slim fit wale nahi".
+// Built per-vocab-term (the term is the anchor
 // here, not the trigger) since multi-word terms need their own boundary.
 const buildReversePattern = (term) =>
   new RegExp(
-    `\\b${escapeRegex(term)}(?:es|s)?\\b\\s+(?:(?:${FILLER_ALTERNATION})\\s+)?(?:${TRIGGER_ALTERNATION})\\b`,
+    `\\b${escapeRegex(term)}(?:es|s)?\\b\\s+(?:(?:${FILLER_ALTERNATION})\\s+){0,2}(?:${TRIGGER_ALTERNATION})\\b`,
     "i",
   );
 
