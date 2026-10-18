@@ -4,6 +4,71 @@ import { getApiConfig } from "../config/api";
 import { ShopContext } from "../context/ShopContext";
 import { searchProducts } from "../utils/productSearch";
 import { COLORS } from "../utils/productAttributes";
+import {
+  createLiveAudioContexts,
+  createPcmPlayer,
+  isLiveAudioSupported,
+  startMicCapture,
+} from "../utils/liveVoice/liveAudio";
+import { LiveVoiceSession } from "../utils/liveVoice/liveVoiceSession";
+import { withReplyLanguage } from "../utils/liveVoice/liveLanguage";
+
+// "live" = realtime speech-to-speech with Gemini Live (the default).
+// "classic" = the turn-based transcribe -> intent -> speak pipeline, which is
+// also the automatic fallback when a browser or network can't run live.
+const PREFERRED_VOICE_MODE =
+  import.meta.env.VITE_VOICE_MODE?.trim() === "classic" ? "classic" : "live";
+
+// A live session streams (and bills) audio for as long as it is open, so it
+// closes itself after this long without the customer saying anything.
+const LIVE_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
+
+// Catalog tools run on the backend (RAG retrieval); everything else runs
+// here, through the same runTool dispatcher and confirmation gates the
+// turn-based path uses.
+const LIVE_BACKEND_TOOLS = new Set([
+  "search_products",
+  "recommend_products",
+  "compare_products",
+  "get_product_details",
+]);
+const LIVE_LOCAL_TOOLS = new Set([
+  "navigate",
+  "sort_products",
+  "open_product",
+  "add_to_cart",
+  "update_cart_quantity",
+  "remove_from_cart",
+  "place_order",
+  "cancel_order",
+  "track_order",
+]);
+
+// Live tool arguments come straight from the model, not through the
+// backend's sanitizers, so cart amounts get the same caps here
+// (utils/assistantToolSanitizers.js on the backend). The backend cart
+// endpoints still re-validate the product, size and stored cart line.
+const clampLiveToolArgs = (name, args) => {
+  const safe = { ...(args || {}) };
+  const asInt = (value) => (Number.isFinite(Number(value)) ? Math.round(Number(value)) : null);
+
+  if (name === "add_to_cart") {
+    const quantity = asInt(safe.quantity);
+    safe.quantity = quantity && quantity > 0 ? Math.min(quantity, 5) : 1;
+  }
+  if (name === "update_cart_quantity") {
+    const quantity = asInt(safe.quantity);
+    const delta = asInt(safe.delta);
+    delete safe.quantity;
+    delete safe.delta;
+    if (delta) safe.delta = Math.max(-10, Math.min(delta, 10));
+    else if (quantity !== null && quantity >= 0) safe.quantity = Math.min(quantity, 10);
+  }
+  ["productId", "query", "size", "orderId", "destination", "sortBy"].forEach((key) => {
+    if (safe[key] !== undefined) safe[key] = String(safe[key]).trim().slice(0, 200);
+  });
+  return safe;
+};
 
 // A hung request (rather than a fast failure) would otherwise leave the
 // assistant stuck in "thinking"/"transcribing" indefinitely.
@@ -330,6 +395,31 @@ export default function AIAssistant() {
   const [conversationHistory, setConversationHistory] = useState([]);
   const [securityNotice, setSecurityNotice] = useState("");
   const [voiceError, setVoiceError] = useState("");
+  // Live captions of the current exchange (realtime mode only) - the
+  // customer can see what Zara heard, which matters most for Hinglish.
+  const [liveCaption, setLiveCaption] = useState({ user: "", assistant: "" });
+
+  // Realtime (Gemini Live) session state - see startLiveSession.
+  const liveSessionRef = useRef(null);
+  const liveMicRef = useRef(null);
+  const livePlayerRef = useRef(null);
+  const liveAudioContextsRef = useRef(null);
+  // True while a live session owns the conversation. speakText() checks it:
+  // the runTool() executors still "speak" their confirmations, but in live
+  // mode that text is captured as the tool result and Zara says it herself,
+  // in the customer's language, instead of it being synthesized separately.
+  const liveModeActiveRef = useRef(false);
+  const liveCapturedSpeechRef = useRef([]);
+  const liveIdleTimerRef = useRef(null);
+  const liveEndAfterSpeechRef = useRef(false);
+  // The customer's finished utterances this session, oldest first - used to
+  // decide Zara's reply language (see liveLanguage.js).
+  const liveUserUtterancesRef = useRef([]);
+  // Latest-render versions of functions the live session's long-lived
+  // callbacks call into (same pattern as processVoiceTextRef).
+  const liveToolHandlerRef = useRef(null);
+  const getUIContextRef = useRef(null);
+  const stopLiveSessionRef = useRef(null);
 
   // Mirrors isSpeaking for use inside SpeechRecognition's callbacks, which
   // are fixed closures created once by ensureRecognition() (see its
@@ -539,6 +629,7 @@ export default function AIAssistant() {
   // MediaRecorder fallback below.
   useEffect(() => {
     return () => {
+      stopLiveSessionRef.current?.();
       listeningSessionRef.current = false;
       hadSpeechRef.current = false;
 
@@ -1028,6 +1119,12 @@ export default function AIAssistant() {
   // naturally instead of reading them through an English voice.
   const speakText = async (text, { onSpeechEnd } = {}) => {
     if (!text) return;
+
+    if (liveModeActiveRef.current) {
+      liveCapturedSpeechRef.current.push(text);
+      onSpeechEnd?.();
+      return;
+    }
 
     stopSpeaking();
     pauseCaptureForSpeech();
@@ -1799,20 +1896,24 @@ export default function AIAssistant() {
   // able to confirm or cancel an order at all. English-only here would mean
   // saying "haan"/"हां" to confirm an order placed in Hindi just never
   // matches anything.
+  // The trailing boundary is an explicit lookahead, not \b: JavaScript's \b
+  // only understands ASCII word characters, so "हाँ" or "नहीं" followed by a
+  // comma, a full stop or the end of the text never matched. Live
+  // transcription returns Hindi in Devanagari, so this has to work there.
+  const YES_NO_END = "(?=$|[\\s,.!?।])";
+  const YES_PATTERN = new RegExp(
+    `^(yes|yeah|yep|yup|sure|confirm|confirmed|go ahead|do it|okay|ok|please do|correct|haan|han|ha|haa|ji haan|ji|bilkul|thik hai|theek hai|kar do|karo|हां|हाँ|जी|जी हां|बिल्कुल|ठीक है|कर दो|करो)${YES_NO_END}`,
+  );
+  const NO_PATTERN = new RegExp(
+    `^(no|nope|nah|cancel|never\\s?mind|stop|don'?t|nahi|nahin|na|mat karo|rehne do|rahne do|नहीं|ना|मत करो|रहने दो)${YES_NO_END}`,
+  );
+
   const parseYesNo = (text) => {
     const normalized = text.toLowerCase().trim();
-    if (
-      /^(yes|yeah|yep|yup|sure|confirm|confirmed|go ahead|do it|okay|ok|please do|correct|haan|han|ha|haa|ji haan|ji|bilkul|thik hai|theek hai|kar do|karo|हां|हाँ|जी|जी हां|बिल्कुल|ठीक है|कर दो|करो)\b/.test(
-        normalized,
-      )
-    ) {
+    if (YES_PATTERN.test(normalized)) {
       return "yes";
     }
-    if (
-      /^(no|nope|nah|cancel|never\s?mind|stop|don'?t|nahi|nahin|na|mat karo|rehne do|rahne do|नहीं|ना|मत करो|रहने दो)\b/.test(
-        normalized,
-      )
-    ) {
+    if (NO_PATTERN.test(normalized)) {
       return "no";
     }
     return null;
@@ -3525,6 +3626,9 @@ export default function AIAssistant() {
 
   useEffect(() => {
     processVoiceTextRef.current = processVoiceText;
+    liveToolHandlerRef.current = handleLiveToolCall;
+    getUIContextRef.current = getUIContext;
+    stopLiveSessionRef.current = stopLiveSession;
   });
 
   const ensureRecognition = () => {
@@ -3935,6 +4039,384 @@ export default function AIAssistant() {
     }
   };
 
+  // ---------------------------------------------------------------------
+  // Realtime voice (Gemini Live)
+  // ---------------------------------------------------------------------
+
+  const clearLiveIdleTimer = () => {
+    if (liveIdleTimerRef.current) {
+      clearTimeout(liveIdleTimerRef.current);
+      liveIdleTimerRef.current = null;
+    }
+  };
+
+  const resetLiveIdleTimer = () => {
+    clearLiveIdleTimer();
+    liveIdleTimerRef.current = setTimeout(() => {
+      liveIdleTimerRef.current = null;
+      if (livePlayerRef.current?.isPlaying()) {
+        resetLiveIdleTimer();
+        return;
+      }
+      stopLiveSessionRef.current?.();
+      setOpen(false);
+      hasGreetedRef.current = false;
+    }, LIVE_IDLE_TIMEOUT_MS);
+  };
+
+  const stopLiveSession = () => {
+    liveModeActiveRef.current = false;
+    liveEndAfterSpeechRef.current = false;
+    clearLiveIdleTimer();
+    liveSessionRef.current?.close();
+    liveSessionRef.current = null;
+    liveMicRef.current?.stop();
+    liveMicRef.current = null;
+    livePlayerRef.current?.close();
+    livePlayerRef.current = null;
+    const contexts = liveAudioContextsRef.current;
+    liveAudioContextsRef.current = null;
+    contexts?.capture.close().catch(() => {});
+    contexts?.playback.close().catch(() => {});
+    liveCapturedSpeechRef.current = [];
+    liveUserUtterancesRef.current = [];
+    setIsSpeaking(false);
+    setLiveCaption({ user: "", assistant: "" });
+  };
+
+  const settleUI = () => new Promise((resolve) => setTimeout(resolve, 150));
+
+  const fetchLiveCatalogTool = async (tool, args, utterance) => {
+    const { backendUrl, apiConfigError } = getApiConfig();
+    if (!backendUrl) throw new Error(apiConfigError || "Backend URL is not configured");
+
+    const response = await fetchWithTimeout(
+      `${backendUrl}/api/voice/live/tool`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { token } : {}),
+        },
+        // No conversation history: the live model passes exactly the
+        // filters the customer means right now (see buildLiveSearchPlan).
+        body: JSON.stringify({ tool, args, utterance }),
+      },
+      15000,
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.success) throw new Error(data.message || "Catalog lookup failed");
+    return data;
+  };
+
+  // Puts grounded catalog results on screen through the same path the
+  // turn-based assistant uses (respondWithRagResult), so the collection page,
+  // session memory and "the second one" resolution all behave identically.
+  const showLiveProducts = (tool, args, utterance, products) => {
+    if (!products.length) return;
+
+    const rag = {
+      answer: "",
+      grounded: true,
+      sources: products.map((product) => ({
+        sourceId: product.id,
+        name: product.name,
+        price: product.price,
+      })),
+    };
+    const query = args.query || utterance;
+    respondWithRagResult(
+      rag,
+      tool === "search_products"
+        ? {
+            query,
+            gender: args.gender || "",
+            category: args.category || "",
+            productType: args.productType || "",
+            color: args.color || "",
+            maxPrice: args.maxPrice ?? "",
+          }
+        : { query, gender: detectGenderSection(utterance), category: "", productType: "", color: "", maxPrice: "" },
+      query,
+    );
+    recordActivity(`Showed ${products.length} products for "${query}"`);
+  };
+
+  // place_order/cancel_order consent is never taken from the model. The
+  // model only signals "the customer answered"; the decision comes from the
+  // customer's own transcribed words in a turn that started AFTER the
+  // confirmation question was created, parsed by the same deterministic
+  // parseYesNo the turn-based path uses.
+  const answerLiveConfirmation = async () => {
+    const pending = pendingActionRef.current;
+    const session = liveSessionRef.current;
+
+    if (!pending || pending.type !== "confirm") {
+      return { status: "nothing_pending", result: "There is no order action waiting for confirmation." };
+    }
+    if (isProcessingActionRef.current) {
+      return { status: "busy", result: "The previous order action is still being processed." };
+    }
+
+    const askedAtSeq = pending.liveSeq ?? Number.MAX_SAFE_INTEGER;
+    const turn = session ? await session.waitForUserTurnAfter(askedAtSeq) : { seq: 0, text: "" };
+    const answer = turn.seq > askedAtSeq ? parseYesNo(turn.text) : null;
+
+    if (answer === "yes") {
+      pendingActionRef.current = null;
+      isProcessingActionRef.current = true;
+      liveCapturedSpeechRef.current = [];
+      try {
+        const spoken = await pending.onConfirm();
+        const result = liveCapturedSpeechRef.current.join(" ") || spoken;
+        recordActivity(result);
+        return { status: "done", result };
+      } finally {
+        isProcessingActionRef.current = false;
+      }
+    }
+
+    if (answer === "no") {
+      pendingActionRef.current = null;
+      return { status: "declined", result: pending.declineMessage || "Okay, nothing was changed." };
+    }
+
+    return {
+      status: "unclear",
+      result: `The customer's answer was not a clear yes or no, so nothing was done. Ask again, briefly: ${pending.question}`,
+    };
+  };
+
+  const handleLiveToolCall = async ({ name, args = {} }) => {
+    const session = liveSessionRef.current;
+    const utterance = session?.getCurrentUserTurn().text || "";
+    liveCapturedSpeechRef.current = [];
+    setSecurityNotice("");
+
+    // Slot-filling state from the turn-based flow (size question, audience
+    // question) has no meaning here - in live mode Zara asks and simply calls
+    // the tool again with the answer. Only an order confirmation persists.
+    if (pendingActionRef.current && pendingActionRef.current.type !== "confirm") {
+      pendingActionRef.current = null;
+    }
+
+    if (name === "get_screen_context") {
+      return { screen: getUIContext() };
+    }
+
+    if (name === "end_conversation") {
+      liveEndAfterSpeechRef.current = true;
+      return { result: "The assistant will close after your goodbye." };
+    }
+
+    if (name === "answer_pending_confirmation") {
+      setCurrentAction("Checking your answer");
+      return answerLiveConfirmation();
+    }
+
+    if (LIVE_BACKEND_TOOLS.has(name)) {
+      setCurrentAction(name === "get_product_details" ? "Checking product details" : "Searching the catalog");
+      const data = await fetchLiveCatalogTool(name, args, utterance);
+      const products = Array.isArray(data.products) ? data.products : [];
+      if (name !== "get_product_details") showLiveProducts(name, args, utterance, products);
+      return { products, note: data.note || "" };
+    }
+
+    if (!LIVE_LOCAL_TOOLS.has(name)) {
+      return { error: `Unknown tool ${name}. Do not call it again.` };
+    }
+
+    const spoken = await runTool(name, clampLiveToolArgs(name, args), utterance);
+    const result = liveCapturedSpeechRef.current.join(" ") || spoken || "Done.";
+
+    let status = "done";
+    if (pendingActionRef.current?.type === "confirm") {
+      // Remember which customer turn asked for this, so only a LATER turn
+      // can confirm it (see answerLiveConfirmation).
+      pendingActionRef.current.liveSeq = session?.getCurrentUserTurn().seq ?? 0;
+      status = "needs_confirmation";
+    } else if (pendingActionRef.current?.type === "add_to_cart_size") {
+      pendingActionRef.current = null;
+      status = "needs_size";
+    } else if (pendingActionRef.current) {
+      pendingActionRef.current = null;
+      status = "needs_more_info";
+    }
+
+    // Let React apply the navigation/cart update so the screen snapshot
+    // reflects what the action just did.
+    await settleUI();
+    return { status, result, screen: getUIContextRef.current?.() || getUIContext() };
+  };
+
+  const runLiveToolCalls = async (functionCalls) => {
+    setStatus("thinking");
+    resetLiveIdleTimer();
+    const responses = [];
+    try {
+      // Sequential on purpose: two cart changes in one breath must apply in
+      // the order the customer said them.
+      for (const call of functionCalls) {
+        let response;
+        try {
+          response = await liveToolHandlerRef.current({ name: call.name, args: call.args || {} });
+        } catch (error) {
+          console.error(`Live tool ${call.name} failed:`, error);
+          response = { error: "That action failed because of a technical problem. Tell the customer and offer to try again." };
+        }
+        // Every result tells Zara which language to answer in, decided from
+        // the customer's own words (see liveLanguage.js).
+        const current = liveSessionRef.current?.getCurrentUserTurn().text || "";
+        const utterances = liveUserUtterancesRef.current.at(-1) === current
+          ? liveUserUtterancesRef.current
+          : [...liveUserUtterancesRef.current, current];
+        responses.push({ id: call.id, name: call.name, response: withReplyLanguage(response, utterances) });
+      }
+    } finally {
+      if (liveModeActiveRef.current) setStatus("listening");
+    }
+    return responses;
+  };
+
+  // Opens the realtime conversation. Called from the click that opens the
+  // assistant, so the audio contexts are created inside the user gesture
+  // (required by Safari). Resolves false when live voice can't run here, so
+  // the caller can fall back to the turn-based pipeline.
+  const startLiveSession = async () => {
+    const { backendUrl } = getApiConfig();
+    if (!backendUrl || !isLiveAudioSupported()) return false;
+
+    let contexts;
+    try {
+      contexts = createLiveAudioContexts();
+    } catch {
+      return false;
+    }
+    liveAudioContextsRef.current = contexts;
+    liveModeActiveRef.current = true;
+    liveUserUtterancesRef.current = [];
+    setLiveCaption({ user: "", assistant: "" });
+    setVoiceError("");
+    setStatus("requesting-mic");
+
+    const player = createPcmPlayer({
+      audioContext: contexts.playback,
+      audioElement: speechAudioElRef.current,
+      preferElementRoute: !isSafariBrowser(),
+      onStart: () => setIsSpeaking(true),
+      onIdle: () => {
+        setIsSpeaking(false);
+        if (liveEndAfterSpeechRef.current) {
+          stopLiveSessionRef.current?.();
+          setOpen(false);
+          hasGreetedRef.current = false;
+        }
+      },
+    });
+    livePlayerRef.current = player;
+
+    const session = new LiveVoiceSession({
+      backendUrl,
+      authToken: token,
+      callbacks: {
+        onAudio: (base64) => {
+          resetLiveIdleTimer();
+          livePlayerRef.current?.enqueue(base64);
+        },
+        onInterrupted: () => {
+          livePlayerRef.current?.flush();
+        },
+        onUserTranscript: ({ text, final }) => {
+          resetLiveIdleTimer();
+          setLiveCaption((caption) => ({ user: text, assistant: final ? caption.assistant : "" }));
+          if (final) {
+            liveUserUtterancesRef.current = [...liveUserUtterancesRef.current, text].slice(-10);
+            setTranscript(text);
+            pushHistory("user", text);
+          }
+        },
+        onAssistantTranscript: ({ text, final }) => {
+          setLiveCaption((caption) => ({ ...caption, assistant: text }));
+          if (final) {
+            setAiReply(text);
+            pushHistory("assistant", text);
+          }
+        },
+        onToolCall: runLiveToolCalls,
+        onReconnecting: () => setStatus("connecting"),
+        onReady: () => {
+          if (liveModeActiveRef.current) setStatus("listening");
+        },
+        onClosed: ({ reason, error }) => {
+          if (reason === "closed" || !liveModeActiveRef.current) return;
+          console.error("Live voice session ended:", error);
+          stopLiveSessionRef.current?.();
+          setVoiceError("The voice connection dropped. Tap retry to continue.");
+          setStatus("error");
+        },
+      },
+    });
+    liveSessionRef.current = session;
+
+    try {
+      const [mic] = await Promise.all([
+        startMicCapture({
+          audioContext: contexts.capture,
+          onChunk: (base64) => liveSessionRef.current?.sendAudio(base64),
+        }),
+        (async () => {
+          setStatus("connecting");
+          await session.start();
+        })(),
+      ]);
+
+      if (!liveModeActiveRef.current || liveSessionRef.current !== session) {
+        mic.stop();
+        return true;
+      }
+      liveMicRef.current = mic;
+
+      // Opening context, so Zara's very first line already fits where the
+      // customer is - then she greets them herself, in Hinglish.
+      const screen = getUIContext();
+      const cartCount = screen.cartLines.reduce((sum, line) => sum + line.quantity, 0);
+      session.sendText(
+        [
+          `[Session start] The customer just opened the voice assistant on the ${screen.page} page.`,
+          screen.selectedProduct ? `They are looking at "${screen.selectedProduct.name}".` : "",
+          cartCount ? `Their cart has ${cartCount} item(s).` : "",
+          hasGreetedRef.current
+            ? "You already greeted them earlier - just say you're listening, in a few words."
+            : "Greet them warmly in one short Hinglish line and ask how you can help.",
+          "If the customer has already started speaking, skip the greeting and answer them directly.",
+        ]
+          .filter(Boolean)
+          .join(" "),
+      );
+      session.openAudio();
+      hasGreetedRef.current = true;
+      setStatus("listening");
+      resetLiveIdleTimer();
+      return true;
+    } catch (error) {
+      console.error("Live voice could not start:", error);
+      const micDenied = error?.name === "NotAllowedError" || error?.name === "SecurityError";
+      stopLiveSession();
+      if (micDenied) {
+        setVoiceError("Microphone access was blocked. Please allow it and try again.");
+        setStatus("permission-denied");
+        return true;
+      }
+      return false;
+    }
+  };
+
+  // Live first, the turn-based pipeline if live can't run here.
+  const startVoiceConversation = async () => {
+    if (PREFERRED_VOICE_MODE === "live" && (await startLiveSession())) return;
+    startRecording();
+  };
+
   const handleAssistantClick = () => {
     if (!open) {
       // Safari requires the playback context to be activated by the same
@@ -3947,11 +4429,12 @@ export default function AIAssistant() {
       // for microphone/audio activation. Delaying this by a timer can leave
       // AudioContext or media playback suspended even after permission was
       // granted, making the assistant appear to ignore the first turn.
-      startRecording();
+      startVoiceConversation();
 
       return;
     }
 
+    stopLiveSession();
     stopRecording();
     stopSpeaking();
 
@@ -3959,6 +4442,7 @@ export default function AIAssistant() {
   };
 
   const closeAssistant = () => {
+    stopLiveSession();
     stopRecording();
     stopSpeaking();
 
@@ -3970,10 +4454,17 @@ export default function AIAssistant() {
   };
 
   const retryVoiceSession = () => {
+    stopLiveSession();
     stopRecording();
     stopSpeaking();
     setStatus("idle");
     setVoiceError("");
+    if (PREFERRED_VOICE_MODE === "live") {
+      // Straight from the retry click, so the new audio contexts are created
+      // inside a user gesture (Safari).
+      startVoiceConversation();
+      return;
+    }
     setTimeout(() => {
       startRecording();
     }, 250);
@@ -3990,6 +4481,9 @@ export default function AIAssistant() {
     switch (status) {
       case "requesting-mic":
         return "Requesting microphone";
+
+      case "connecting":
+        return "Connecting";
 
       case "listening":
         return "Listening";
@@ -4024,7 +4518,7 @@ export default function AIAssistant() {
     ? "default"
     : isSpeaking || status === "speaking"
       ? "speaking"
-      : status === "listening" || status === "requesting-mic"
+      : status === "listening" || status === "requesting-mic" || status === "connecting"
         ? "listening"
         : status === "thinking" || status === "transcribing"
           ? "thinking"
@@ -4470,12 +4964,27 @@ export default function AIAssistant() {
           <div className="idris-ai-box">
             <div className="idris-ai-status">{getStatusText()}</div>
 
-            {isSpeaking && (
-              <div className="idris-ai-message">
-                <strong>Voice:</strong>
-                <br />
-                Speaking out loud
+            {(liveCaption.user || liveCaption.assistant) ? (
+              <div className="idris-ai-message" aria-live="polite">
+                {liveCaption.user && (
+                  <div>
+                    <strong>You:</strong> {liveCaption.user}
+                  </div>
+                )}
+                {liveCaption.assistant && (
+                  <div style={{ marginTop: liveCaption.user ? 6 : 0 }}>
+                    <strong>Zara:</strong> {liveCaption.assistant}
+                  </div>
+                )}
               </div>
+            ) : (
+              isSpeaking && (
+                <div className="idris-ai-message">
+                  <strong>Voice:</strong>
+                  <br />
+                  Speaking out loud
+                </div>
+              )
             )}
 
             {securityNotice && (
