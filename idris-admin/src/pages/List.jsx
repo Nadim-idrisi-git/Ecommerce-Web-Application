@@ -219,14 +219,14 @@ const List = ({ token }) => {
                   {product.gender} / {product.category}
                 </p>
                 <p className="md:hidden text-xs text-gray-500 mt-1">
-                  ${product.price}
+                  ₹{product.price}
                 </p>
               </div>
 
               <p className="hidden md:block text-gray-700">
                 {product.gender} / {product.category}
               </p>
-              <p className="hidden md:block text-gray-700">${product.price}</p>
+              <p className="hidden md:block text-gray-700">₹{product.price}</p>
 
               <button
                 onClick={(e) => {
@@ -289,7 +289,7 @@ const List = ({ token }) => {
                   <div>
                     <p className="text-gray-500">Price</p>
                     <p className="font-medium text-gray-800 mt-1">
-                      ${selectedProduct.price}
+                      ₹{selectedProduct.price}
                     </p>
                   </div>
                   <div>

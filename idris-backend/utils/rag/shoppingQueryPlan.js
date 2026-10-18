@@ -63,6 +63,40 @@ const priorUserTurnTexts = (history) =>
     .map((entry) => entry.parts[0]?.text || "")
     .filter(Boolean);
 
+// "Widening" language: the customer is explicitly asking to drop an earlier
+// constraint. Without this, "black jacket dikhao" followed by "mujhe sabhi
+// jacket dikhao" (or "koi sa bhi colour ho") kept the inherited colour and
+// answered "we only have this one black jacket" - wrong, the catalog has
+// many more. Only constraints inherited from EARLIER turns are dropped; the
+// current turn's own words always stand ("sabhi black jackets" stays black).
+const ANY_WORDS = String.raw`(?:any|all|every|koi\s*(?:s[aie]\s*)?bhi|kisi\s*bhi|kuch\s*bhi|har|sabhi|saare|sare|alag\s*alag|different)`;
+const FIELD_WORDS = {
+  color: String.raw`(?:colou?rs?|rang|shades?)`,
+  material: String.raw`(?:fabrics?|materials?|kapd[ae])`,
+  fit: String.raw`(?:fits?|fitting)`,
+  pattern: String.raw`(?:patterns?|designs?|prints?)`,
+  price: String.raw`(?:price|budget|range|daam|keemat|kimat)`,
+};
+const fieldWideningPattern = (fieldWords) =>
+  new RegExp(String.raw`\b${ANY_WORDS}\s+${fieldWords}\b|\b${fieldWords}\s+(?:${ANY_WORDS}|chalega|chalegi|matter\s+nahi)\b`, "i");
+const FIELD_WIDENING = Object.fromEntries(
+  Object.entries(FIELD_WORDS).map(([field, words]) => [field, fieldWideningPattern(words)]),
+);
+// "sari"/"saari" are deliberately absent - they also mean saree.
+const WIDEN_ALL_PATTERN =
+  /\b(?:sabhi|saare|sare|sab|all|every|poore|pura|puri|tamam|koi\s*(?:s[aie]\s*)?bhi|kuch\s*bhi|any)\b|सभी|सारे|सब\s|हर\s*तरह|कोई\s*भी/i;
+
+export const detectWidening = (text) => {
+  const value = String(text || "");
+  const fields = new Set(
+    Object.entries(FIELD_WIDENING)
+      .filter(([, pattern]) => pattern.test(value))
+      .map(([field]) => field),
+  );
+  // "koi bhi colour" widens only colour; a bare "sabhi"/"koi bhi" widens all.
+  return { all: fields.size === 0 && WIDEN_ALL_PATTERN.test(value), fields };
+};
+
 // query: string -> { hard: {minPrice,maxPrice}|null, soft: {targetPrice}|null }
 // Thin wrapper solely so callers/tests can inspect both signals for one
 // turn's text together - detectPriceIntent()/detectSoftPriceIntent() are
@@ -85,6 +119,8 @@ export const buildShoppingQueryPlan = ({ originalQuery, toolArguments = {}, hist
 
   const turns = [...priorUserTurnTexts(history), String(originalQuery || "")];
   let currentTurnHasSignal = false;
+  let currentTurnPositive = {};
+  let currentTurnPrice = { hard: null, soft: null };
 
   turns.forEach((text, index) => {
     const positive = resolveSameTurnContradiction(detectPositiveAttributes(text), detectExclusions(text));
@@ -92,6 +128,8 @@ export const buildShoppingQueryPlan = ({ originalQuery, toolArguments = {}, hist
     const { hard, soft } = detectTurnPrice(text);
 
     if (index === turns.length - 1) {
+      currentTurnPositive = positive;
+      currentTurnPrice = { hard, soft };
       currentTurnHasSignal =
         INCLUDE_FIELDS.some((field) => positive[field]?.length > 0) || hasExclusions(negative) || Boolean(hard) || Boolean(soft);
     }
@@ -123,6 +161,20 @@ export const buildShoppingQueryPlan = ({ originalQuery, toolArguments = {}, hist
       softPrice = soft;
     }
   });
+
+  const widening = detectWidening(originalQuery);
+  if (turns.length > 1 && (widening.all || widening.fields.size > 0)) {
+    INCLUDE_FIELDS.forEach((field) => {
+      const statedNow = currentTurnPositive[field]?.length > 0;
+      if (!statedNow && include[field] && (widening.all || widening.fields.has(field))) {
+        delete include[field];
+      }
+    });
+    if (widening.all || widening.fields.has("price")) {
+      hardPrice = currentTurnPrice.hard || null;
+      softPrice = currentTurnPrice.soft || null;
+    }
+  }
 
   // toolArguments only ever fills a gap the deterministic multi-turn text
   // parse left empty - it never overrides a field the text parse already

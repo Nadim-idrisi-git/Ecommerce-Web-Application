@@ -8,7 +8,7 @@ import { useNavigate } from "react-router-dom";
 import { getApiConfig } from "../config/api";
 
 const ShopContextProvider = (props) => {
-  const currency = "$";
+  const currency = "₹";
   const delivery_fee = 10;
   const { backendUrl, apiConfigError } = getApiConfig();
   const navigate = useNavigate();

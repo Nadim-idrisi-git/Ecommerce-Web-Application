@@ -59,8 +59,10 @@ export const SOFT_PREFERENCE_WORDS = Object.keys(SOFT_PREFERENCE_SYNONYMS);
 // Soft ("approximate") price phrasing - distinct from priceIntent.js's
 // hard under/below/upto/between patterns. "around"/"approximately"/"~" is
 // a preference (closer is better), never a hard cutoff.
+// Hinglish "lagbhag/takreeban 2000" and "2000 ke aas paas" are the same
+// preference. (priceIntent.js converts "do hazaar" etc. to digits first.)
 export const SOFT_PRICE_PATTERN =
-  /\b(?:around|approximately|approx\.?|near|about)\s+(?:rs\.?|₹|rupees)?\s*(\d+(?:,\d{3})*)|~\s*(?:rs\.?|₹)?\s*(\d+(?:,\d{3})*)/;
+  /\b(?:around|approximately|approx\.?|near|about|lagbhag|lagbhg|takreeban)\s+(?:rs\.?|₹|rupees|rupaye)?\s*(\d+(?:,\d{3})*)|(?:~\s*(?:rs\.?|₹)?\s*|\b)(\d+(?:,\d{3})*)(?=\s*(?:rs\.?|₹|rupees|rupaye)?\s*(?:ke|ka)?\s*(?:aas\s*paas|aaspaas|around)\b)|~\s*(?:rs\.?|₹)?\s*(\d+(?:,\d{3})*)/;
 
 // Bounded reranker boosts added by this module - kept in the same
 // multiplicative-of-rrfScore scheme as RAG_RERANK_WEIGHTS

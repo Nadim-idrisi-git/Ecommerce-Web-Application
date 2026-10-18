@@ -240,7 +240,7 @@ const Add = ({ token }) => {
             value={price}
             className="w-full px-3 py-2 border border-gray-300"
             type="Number"
-            placeholder="25"
+            placeholder="1299"
           />
         </div>
       </div>
